@@ -26,7 +26,7 @@ gateway_ok() {
 	case "$body" in
 		*'"ready":true'*)
 			case "$body" in
-				*degraded*) return 1 ;;
+				*'"degraded":true'*) return 1 ;;
 				*) return 0 ;;
 			esac
 			;;
