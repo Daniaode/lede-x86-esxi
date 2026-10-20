@@ -15,7 +15,7 @@
 
 | 路径 | 说明 |
 |---|---|
-| `seed.config` | 构建用 `.config`（`make defconfig` 前的种子配置） |
+| `seed.config` | 构建使用的完整 `.config`（可直接 `cp` 后 `make defconfig -j$(nproc)`） |
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
 | `manifest/` | 最终固件的软件包清单，可用于核对 |
