@@ -1,0 +1,37 @@
+#!/bin/sh
+
+[ -f /etc/config/fakehttp ] && exit 0
+[ -f /etc/config/fakehttp-opkg ] && exit 0
+
+uci -q batch <<-'EOF'
+	set fakehttp.main=fakehttp
+	set fakehttp.main.enabled='0'
+	set fakehttp.main.interface_mode='custom'
+	add_list fakehttp.main.interfaces='wan'
+	set fakehttp.main.direction='both'
+	set fakehttp.main.ip_family='both'
+	set fakehttp.main.queue_num='100'
+	set fakehttp.main.fwmark='0x8000'
+	set fakehttp.main.fwmask=''
+	set fakehttp.main.repeat='2'
+	set fakehttp.main.ttl='3'
+	set fakehttp.main.dynamic_pct=''
+	set fakehttp.main.disable_hop_estimation='0'
+	set fakehttp.main.skip_firewall='0'
+	set fakehttp.main.use_iptables='0'
+	set fakehttp.main.silent='1'
+	set fakehttp.main.log_file='/var/log/fakehttp/fakehttp.log'
+	set fakehttp.main.log_max_size='1M'
+	set fakehttp.main.log_rotate_count='3'
+	set fakehttp.main.scheduled_restart='0'
+	set fakehttp.main.restart_mode='daily'
+	set fakehttp.main.restart_time='04:00'
+	set fakehttp.main.restart_weekday='0'
+	set fakehttp.main.restart_interval_hours='24'
+	add fakehttp payload
+	set fakehttp.@payload[-1].type='http'
+	set fakehttp.@payload[-1].value='www.speedtest.cn'
+	commit fakehttp
+EOF
+
+exit 0

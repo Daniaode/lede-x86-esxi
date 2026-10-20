@@ -1,0 +1,888 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+USE_PROCD=1
+
+NAME="fakehttp"
+PROG="/usr/bin/fakehttp"
+CONFIG="fakehttp"
+SECTION="main"
+CRON_FILE="/etc/crontabs/root"
+CRON_BEGIN="# BEGIN fakehttp scheduled restart"
+CRON_END="# END fakehttp scheduled restart"
+SCHEDULE_HELPER="/usr/libexec/fakehttp-scheduled-restart"
+RUN_DIR="/var/run/fakehttp"
+STAMP_FILE="$RUN_DIR/restart.stamp"
+FILTER_FILE="$RUN_DIR/filter.rules"
+DEFAULT_LOG_FILE="/var/log/fakehttp/fakehttp.log"
+DEFAULT_LOG_MAX_SIZE="1M"
+DEFAULT_LOG_ROTATE_COUNT="3"
+START_WAIT_SECONDS="8"
+START_WAIT_USLEEP="250000"
+
+EXTRA_COMMANDS="start_now stop_now restart_now update_cron clear_cron cleanup_rules"
+EXTRA_HELP="	start_now	Start FakeHTTP once without changing UCI enabled
+	stop_now	Stop FakeHTTP and ignore missing procd service
+	restart_now	Restart FakeHTTP once without changing UCI enabled
+	update_cron	Rebuild FakeHTTP cron tasks
+	clear_cron	Remove FakeHTTP cron tasks
+	cleanup_rules	Remove stale FakeHTTP firewall rules"
+
+. /lib/functions.sh
+. /lib/functions/network.sh
+. /lib/functions/procd.sh
+. /usr/share/fakehttp/functions.sh
+
+log_msg() {
+	local level="$1"
+
+	shift
+	logger -t "$NAME" -p "daemon.$level" "$*"
+}
+
+log_error() {
+	log_msg err "ERROR: $*"
+}
+
+log_notice() {
+	log_msg notice "$*"
+}
+
+is_time() {
+	local hour minute
+
+	case "$1" in
+		[01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;;
+		*) return 1 ;;
+	esac
+
+	hour="${1%:*}"
+	minute="${1#*:}"
+	hour="${hour#0}"
+	minute="${minute#0}"
+	[ -n "$hour" ] || hour=0
+	[ -n "$minute" ] || minute=0
+
+	[ "$hour" -ge 0 ] && [ "$hour" -le 23 ] && [ "$minute" -ge 0 ] && [ "$minute" -le 59 ]
+}
+
+is_uint32() {
+	is_uint "$1" && [ "$1" -ge 0 ] && [ "$1" -le 4294967295 ]
+}
+
+is_mark() {
+	local value="$1"
+	local hex
+
+	case "$value" in
+		'')
+			return 1
+			;;
+		0x*)
+			hex="${value#0x}"
+			;;
+		0X*)
+			hex="${value#0X}"
+			;;
+		*)
+			is_uint32 "$value"
+			return "$?"
+			;;
+	esac
+
+	case "$hex" in
+		''|*[!0-9a-fA-F]*)
+			return 1
+			;;
+	esac
+
+	[ "${#hex}" -le 8 ]
+}
+
+cron_reload() {
+	/etc/init.d/cron reload >/dev/null 2>&1 || /etc/init.d/cron restart >/dev/null 2>&1 || true
+}
+
+remove_cron_block_by_marker() {
+	local begin="$1"
+	local end="$2"
+	local tmp
+
+	[ -f "$CRON_FILE" ] || return 0
+	tmp="$(mktemp "$CRON_FILE.XXXXXX")" || return 1
+	awk -v begin="$begin" -v end="$end" '
+		$0 == begin { skip = 1; next }
+		$0 == end { skip = 0; next }
+		!skip { print }
+	' "$CRON_FILE" > "$tmp" || {
+		rm -f "$tmp"
+		return 1
+	}
+	chmod 600 "$tmp" 2>/dev/null || true
+	mv -f "$tmp" "$CRON_FILE" || {
+		rm -f "$tmp"
+		return 1
+	}
+}
+
+remove_cron_block() {
+	remove_cron_block_by_marker "$CRON_BEGIN" "$CRON_END"
+}
+
+clear_cron() {
+	remove_cron_block
+	cron_reload
+}
+
+update_interval_stamp() {
+	mkdir -p "$RUN_DIR"
+	date +%s > "$STAMP_FILE"
+}
+
+append_cron_block() {
+	local begin="$1"
+	local line="$2"
+	local end="$3"
+
+	[ -n "$line" ] || return 0
+
+	{
+		echo "$begin"
+		echo "$line"
+		echo "$end"
+	} >> "$CRON_FILE"
+}
+
+is_log_size() {
+	local value="$1"
+	local number
+
+	case "$value" in
+		''|*[!0-9KkMmGg]*) return 1 ;;
+	esac
+
+	case "$value" in
+		*[KkMmGg]) number="${value%?}" ;;
+		*) number="$value" ;;
+	esac
+
+	is_uint "$number"
+}
+
+validate_log_rotation_config() {
+	local log_file="$1"
+	local log_max_size="$2"
+	local log_rotate_count="$3"
+
+	if ! fakehttp_validate_log_path "$log_file"; then
+		log_error "log_file must be an absolute path under /var/log, /mnt, or /opt without parent traversal or symlinks: $log_file"
+		return 1
+	fi
+
+	is_log_size "$log_max_size" || {
+		log_error "invalid log_max_size: $log_max_size"
+		return 1
+	}
+
+	is_uint "$log_rotate_count" && [ "$log_rotate_count" -ge 0 ] && [ "$log_rotate_count" -le 1000 ] || {
+		log_error "invalid log_rotate_count: $log_rotate_count"
+		return 1
+	}
+
+	return 0
+}
+
+update_cron() {
+	local enabled scheduled_restart restart_mode restart_time restart_weekday restart_interval_hours
+	local hour minute cron_line
+	local interval_stamp=0
+
+	config_load "$CONFIG"
+	config_get_bool enabled "$SECTION" enabled 0
+	config_get_bool scheduled_restart "$SECTION" scheduled_restart 0
+	config_get restart_mode "$SECTION" restart_mode "daily"
+	config_get restart_time "$SECTION" restart_time "04:00"
+	config_get restart_weekday "$SECTION" restart_weekday "0"
+	config_get restart_interval_hours "$SECTION" restart_interval_hours "24"
+
+	if [ "$enabled" -ne 1 ]; then
+		mkdir -p "$(dirname "$CRON_FILE")"
+		touch "$CRON_FILE"
+		remove_cron_block
+		cron_reload
+		return 0
+	fi
+
+	if [ "$scheduled_restart" -eq 1 ]; then
+		case "$restart_mode" in
+			daily|weekly)
+				if ! is_time "$restart_time"; then
+					log_error "invalid restart_time: $restart_time"
+					cron_reload
+					return 1
+				fi
+
+				hour="${restart_time%:*}"
+				minute="${restart_time#*:}"
+
+				if [ "$restart_mode" = "daily" ]; then
+					cron_line="$minute $hour * * * $SCHEDULE_HELPER daily >/dev/null 2>&1"
+				else
+					is_uint "$restart_weekday" && [ "$restart_weekday" -ge 0 ] && [ "$restart_weekday" -le 6 ] || {
+						log_error "invalid restart_weekday: $restart_weekday"
+						cron_reload
+						return 1
+					}
+					cron_line="$minute $hour * * $restart_weekday $SCHEDULE_HELPER weekly >/dev/null 2>&1"
+				fi
+				;;
+			interval)
+				is_uint "$restart_interval_hours" && [ "$restart_interval_hours" -ge 1 ] && [ "$restart_interval_hours" -le 168 ] || {
+					log_error "invalid restart_interval_hours: $restart_interval_hours"
+					cron_reload
+					return 1
+				}
+				cron_line="0 * * * * $SCHEDULE_HELPER interval >/dev/null 2>&1"
+				interval_stamp=1
+				;;
+			*)
+				log_error "invalid restart_mode: $restart_mode"
+				cron_reload
+				return 1
+				;;
+		esac
+	fi
+
+	mkdir -p "$(dirname "$CRON_FILE")"
+	touch "$CRON_FILE"
+	remove_cron_block
+	append_cron_block "$CRON_BEGIN" "$cron_line" "$CRON_END"
+	[ "$interval_stamp" -eq 1 ] && update_interval_stamp
+
+	cron_reload
+}
+
+append_arg() {
+	procd_append_param command "$1"
+	[ -n "$2" ] && procd_append_param command "$2"
+}
+
+append_optional_arg() {
+	local flag="$1"
+	local value="$2"
+
+	[ -n "$value" ] || return 0
+	append_arg "$flag" "$value"
+}
+
+stop_procd_service() {
+	local err
+
+	service_exists || return 0
+
+	err="$(ubus call service delete "{\"name\":\"$NAME\"}" 2>&1)" && return 0
+
+	echo "$err" | grep -q "Not found" && return 0
+
+	[ -n "$err" ] && echo "$err" >&2
+	return 1
+}
+
+service_exists() {
+	ubus call service list "{\"name\":\"$NAME\"}" 2>/dev/null | grep -q "\"$NAME\"[[:space:]]*:"
+}
+
+service_is_running() {
+	ubus call service list "{\"name\":\"$NAME\"}" 2>/dev/null | grep -q '"running":[[:space:]]*true'
+}
+
+wait_for_running() {
+	local deadline sleep_cmd
+
+	deadline=$(($(date +%s) + START_WAIT_SECONDS))
+	if command -v usleep >/dev/null 2>&1; then
+		sleep_cmd="usleep $START_WAIT_USLEEP"
+	else
+		sleep_cmd="sleep 1"
+	fi
+
+	while [ "$(date +%s)" -le "$deadline" ]; do
+		service_is_running && return 0
+		$sleep_cmd
+	done
+
+	return 1
+}
+
+resolve_interface() {
+	local input="$1"
+	local dev
+
+	input="${input#@}"
+
+	if network_get_device dev "$input" || network_get_physdev dev "$input"; then
+		[ -n "$dev" ] && {
+			echo "$dev"
+			return 0
+		}
+	fi
+
+	if [ -d "/sys/class/net/$input" ]; then
+		echo "$input"
+		return 0
+	fi
+
+	log_error "unable to resolve interface: $1"
+	return 1
+}
+
+validate_payload_section() {
+	local section="$1"
+	local type value
+
+	config_get type "$section" type "http"
+	config_get value "$section" value
+
+	case "$type" in
+		http|https)
+			[ -n "$value" ] || {
+				log_error "payload value is required in $section"
+				return 1
+			}
+			;;
+		custom)
+			[ -n "$value" ] || {
+				log_error "payload file is required in $section"
+				return 1
+			}
+			case "$value" in
+				/*) ;;
+				*)
+					log_error "payload file must be an absolute path in $section"
+					return 1
+					;;
+			esac
+			;;
+		*)
+			log_error "invalid payload type in $section: $type"
+			return 1
+			;;
+	esac
+
+	return 0
+}
+
+validate_payload_entry() {
+	local section="$1"
+
+	payload_count=$((payload_count + 1))
+	validate_payload_section "$section" || payload_invalid=1
+}
+
+validate_payloads() {
+	local payload_count=0 payload_invalid=0
+
+	config_foreach validate_payload_entry payload
+
+	if [ "$payload_count" -eq 0 ]; then
+		log_error "at least one payload is required"
+		return 1
+	fi
+
+	[ "$payload_invalid" -eq 0 ]
+}
+
+is_port() {
+	is_uint "$1" && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
+}
+
+is_ipv4_addr() {
+	local old_ifs="$IFS"
+	local octet
+
+	IFS=.
+	set -- $1
+	IFS="$old_ifs"
+
+	[ "$#" -eq 4 ] || return 1
+
+	for octet in "$@"; do
+		is_uint "$octet" && [ "$octet" -le 255 ] || return 1
+	done
+
+	return 0
+}
+
+is_ipv6_addr() {
+	case "$1" in
+		*:* ) ;;
+		*) return 1 ;;
+	esac
+
+	case "$1" in
+		''|*[!0-9A-Fa-f:.]*|*:::*) return 1 ;;
+	esac
+
+	return 0
+}
+
+is_filter_token() {
+	case "$1" in
+		''|*[!A-Za-z0-9:./-]*) return 1 ;;
+	esac
+	return 0
+}
+
+validate_filter_ip() {
+	local value="$1"
+	local addr prefix
+
+	case "$value" in
+		*/*)
+			addr="${value%%/*}"
+			prefix="${value#*/}"
+			[ -n "$addr" ] && [ -n "$prefix" ] || return 1
+			case "$prefix" in */*) return 1 ;; esac
+			;;
+		*)
+			addr="$value"
+			prefix=""
+			;;
+	esac
+
+	if is_ipv4_addr "$addr"; then
+		[ -z "$prefix" ] || { is_uint "$prefix" && [ "$prefix" -le 32 ]; }
+		return "$?"
+	fi
+
+	if is_ipv6_addr "$addr"; then
+		[ -z "$prefix" ] || { is_uint "$prefix" && [ "$prefix" -le 128 ]; }
+		return "$?"
+	fi
+
+	return 1
+}
+
+validate_filter_port() {
+	local value="$1"
+	local start end
+
+	case "$value" in
+		*-*)
+			start="${value%%-*}"
+			end="${value#*-}"
+			is_port "$start" && is_port "$end" && [ "$start" -le "$end" ]
+			return "$?"
+			;;
+		*)
+			is_port "$value"
+			return "$?"
+			;;
+	esac
+}
+
+validate_filter_rule() {
+	local section="$1"
+	local action type value
+
+	config_get action "$section" action "allow"
+	config_get type "$section" type "ip"
+	config_get value "$section" value
+
+	case "$action" in
+		allow|deny) ;;
+		*)
+			log_error "invalid filter action in section $section: $action"
+			return 1
+			;;
+	esac
+
+	case "$type" in
+		ip|port) ;;
+		*)
+			log_error "invalid filter type in section $section: $type"
+			return 1
+			;;
+	esac
+
+	is_filter_token "$value" || {
+		log_error "invalid filter value in section $section: $value"
+		return 1
+	}
+
+	case "$type" in
+		ip)
+			validate_filter_ip "$value" || {
+				log_error "invalid filter IP in section $section: $value"
+				return 1
+			}
+			;;
+		port)
+			validate_filter_port "$value" || {
+				log_error "invalid filter port in section $section: $value"
+				return 1
+			}
+			;;
+	esac
+
+	return 0
+}
+
+validate_filter_entry() {
+	local section="$1"
+
+	validate_filter_rule "$section" || filter_invalid=1
+}
+
+validate_filter_rules() {
+	local filter_invalid=0
+
+	config_foreach validate_filter_entry filter
+
+	[ "$filter_invalid" -eq 0 ]
+}
+
+append_payload_section() {
+	local section="$1"
+	local type value
+
+	config_get type "$section" type "http"
+	config_get value "$section" value
+
+	case "$type" in
+		https) append_arg "-e" "$value" ;;
+		custom) append_arg "-b" "$value" ;;
+		*) append_arg "-h" "$value" ;;
+	esac
+}
+
+append_filter_rule() {
+	local section="$1"
+	local action type value
+
+	config_get action "$section" action "allow"
+	config_get type "$section" type "ip"
+	config_get value "$section" value
+
+	printf '%s %s %s\n' "$action" "$type" "$value" >> "$filter_output_file" || filter_write_failed=1
+	filter_write_count=$((filter_write_count + 1))
+}
+
+prepare_filter_file() {
+	local tmp
+
+	rm -f "$FILTER_FILE"
+	mkdir -p "$RUN_DIR" || return 1
+
+	tmp="$(mktemp "$RUN_DIR/filter.XXXXXX")" || return 1
+	filter_output_file="$tmp"
+	filter_write_count=0
+	filter_write_failed=0
+
+	config_foreach append_filter_rule filter
+	filter_output_file=""
+
+	if [ "$filter_write_failed" -ne 0 ]; then
+		rm -f "$tmp"
+		return 1
+	fi
+
+	if [ "$filter_write_count" -eq 0 ]; then
+		rm -f "$tmp"
+		return 0
+	fi
+
+	chmod 600 "$tmp" 2>/dev/null || true
+	mv -f "$tmp" "$FILTER_FILE" || {
+		rm -f "$tmp"
+		return 1
+	}
+
+	echo "$FILTER_FILE"
+}
+
+validate_start_config() {
+	local interface_mode interfaces direction ip_family queue_num fwmark fwmask repeat ttl
+	local dynamic_pct disable_hop_estimation log_file log_max_size log_rotate_count iface
+
+	config_get interface_mode "$SECTION" interface_mode "custom"
+	config_get interfaces "$SECTION" interfaces
+	config_get direction "$SECTION" direction "both"
+	config_get ip_family "$SECTION" ip_family "both"
+	config_get queue_num "$SECTION" queue_num "100"
+	config_get fwmark "$SECTION" fwmark "0x8000"
+	config_get fwmask "$SECTION" fwmask
+	config_get repeat "$SECTION" repeat "2"
+	config_get ttl "$SECTION" ttl "3"
+	config_get dynamic_pct "$SECTION" dynamic_pct
+	config_get_bool disable_hop_estimation "$SECTION" disable_hop_estimation 0
+	config_get log_file "$SECTION" log_file "$DEFAULT_LOG_FILE"
+	config_get log_max_size "$SECTION" log_max_size "$DEFAULT_LOG_MAX_SIZE"
+	config_get log_rotate_count "$SECTION" log_rotate_count "$DEFAULT_LOG_ROTATE_COUNT"
+
+	case "$interface_mode" in
+		all|custom) ;;
+		*)
+			log_error "invalid interface_mode: $interface_mode"
+			return 1
+			;;
+	esac
+
+	if [ "$interface_mode" = "custom" ] && [ -z "$interfaces" ]; then
+		log_error "at least one interface is required"
+		return 1
+	fi
+
+	if [ "$interface_mode" = "custom" ]; then
+		for iface in $interfaces; do
+			resolve_interface "$iface" >/dev/null || return 1
+		done
+	fi
+
+	validate_payloads || return 1
+	validate_filter_rules || return 1
+
+	case "$direction" in
+		both|inbound|outbound) ;;
+		*)
+			log_error "invalid direction: $direction"
+			return 1
+			;;
+	esac
+
+	case "$ip_family" in
+		both|ipv4|ipv6) ;;
+		*)
+			log_error "invalid ip_family: $ip_family"
+			return 1
+			;;
+	esac
+
+	is_uint "$queue_num" && [ "$queue_num" -ge 1 ] && [ "$queue_num" -le 4294967295 ] || {
+		log_error "invalid queue_num: $queue_num"
+		return 1
+	}
+
+	[ -z "$fwmark" ] || is_mark "$fwmark" || {
+		log_error "invalid fwmark: $fwmark"
+		return 1
+	}
+
+	[ -z "$fwmask" ] || is_mark "$fwmask" || {
+		log_error "invalid fwmask: $fwmask"
+		return 1
+	}
+
+	is_uint "$repeat" && [ "$repeat" -ge 1 ] && [ "$repeat" -le 10 ] || {
+		log_error "invalid repeat: $repeat"
+		return 1
+	}
+
+	is_uint "$ttl" && [ "$ttl" -ge 1 ] && [ "$ttl" -le 255 ] || {
+		log_error "invalid ttl: $ttl"
+		return 1
+	}
+
+	if [ -n "$dynamic_pct" ]; then
+		is_uint "$dynamic_pct" && [ "$dynamic_pct" -ge 1 ] && [ "$dynamic_pct" -le 99 ] || {
+			log_error "invalid dynamic_pct: $dynamic_pct"
+			return 1
+		}
+		if [ "$disable_hop_estimation" -eq 1 ]; then
+			log_error "dynamic_pct cannot be used with disable_hop_estimation"
+			return 1
+		fi
+	fi
+
+	[ -z "$log_file" ] || validate_log_rotation_config "$log_file" "$log_max_size" "$log_rotate_count" || return 1
+
+	return 0
+}
+
+start_service() {
+	local enabled interface_mode interfaces iface
+	local direction ip_family queue_num fwmark fwmask repeat ttl dynamic_pct
+	local disable_hop_estimation skip_firewall use_iptables silent log_file filter_file resolved_iface
+	local log_max_size log_rotate_count
+
+	config_load "$CONFIG"
+
+	config_get_bool enabled "$SECTION" enabled 0
+	if [ "$enabled" -ne 1 ] && [ "$START_NOW" != "1" ]; then
+		update_cron || return 1
+		return 0
+	fi
+
+	[ -x "$PROG" ] || {
+		log_error "$PROG is not executable"
+		return 1
+	}
+
+	config_get interface_mode "$SECTION" interface_mode "custom"
+	config_get interfaces "$SECTION" interfaces
+	config_get direction "$SECTION" direction "both"
+	config_get ip_family "$SECTION" ip_family "both"
+	config_get queue_num "$SECTION" queue_num "100"
+	config_get fwmark "$SECTION" fwmark "0x8000"
+	config_get fwmask "$SECTION" fwmask
+	config_get repeat "$SECTION" repeat "2"
+	config_get ttl "$SECTION" ttl "3"
+	config_get dynamic_pct "$SECTION" dynamic_pct
+	config_get_bool disable_hop_estimation "$SECTION" disable_hop_estimation 0
+	config_get_bool skip_firewall "$SECTION" skip_firewall 0
+	config_get_bool use_iptables "$SECTION" use_iptables 0
+	config_get_bool silent "$SECTION" silent 1
+	config_get log_file "$SECTION" log_file "$DEFAULT_LOG_FILE"
+	config_get log_max_size "$SECTION" log_max_size "$DEFAULT_LOG_MAX_SIZE"
+	config_get log_rotate_count "$SECTION" log_rotate_count "$DEFAULT_LOG_ROTATE_COUNT"
+
+	validate_start_config || return 1
+
+	update_cron || return 1
+
+	if [ -n "$log_file" ]; then
+		mkdir -p "$(dirname "$log_file")" || {
+			log_error "failed to create log directory: $(dirname "$log_file")"
+			return 1
+		}
+	fi
+
+	filter_file="$(prepare_filter_file)" || {
+		log_error "failed to prepare filter rules"
+		return 1
+	}
+
+	procd_open_instance "$NAME"
+	procd_set_param command "$PROG"
+
+	if [ "$interface_mode" = "all" ]; then
+		append_arg "-a"
+	else
+		for iface in $interfaces; do
+			resolved_iface="$(resolve_interface "$iface")" || return 1
+			append_arg "-i" "$resolved_iface"
+		done
+	fi
+
+	config_foreach append_payload_section payload
+
+	case "$direction" in
+		inbound) append_arg "-0" ;;
+		outbound) append_arg "-1" ;;
+	esac
+
+	case "$ip_family" in
+		ipv4) append_arg "-4" ;;
+		ipv6) append_arg "-6" ;;
+	esac
+
+	append_arg "-n" "$queue_num"
+	append_optional_arg "-m" "$fwmark"
+	append_optional_arg "-x" "$fwmask"
+	append_arg "-r" "$repeat"
+	append_arg "-t" "$ttl"
+	append_optional_arg "-y" "$dynamic_pct"
+
+	[ "$disable_hop_estimation" -eq 1 ] && append_arg "-g"
+	[ "$skip_firewall" -eq 1 ] && append_arg "-f"
+	[ "$use_iptables" -eq 1 ] && append_arg "-z"
+	[ "$silent" -eq 1 ] && append_arg "-s"
+	if [ -n "$log_file" ]; then
+		append_arg "-w" "$log_file"
+		append_arg "--log-max-size" "$log_max_size"
+		append_arg "--log-rotate" "$log_rotate_count"
+	fi
+	append_optional_arg "-l" "$filter_file"
+
+	procd_set_param respawn 3600 3 10
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+reload_service() {
+	local enabled
+
+	config_load "$CONFIG"
+	config_get_bool enabled "$SECTION" enabled 0
+	if [ "$enabled" -eq 1 ]; then
+		validate_start_config || {
+			log_error "reload failed: invalid service configuration"
+			return 1
+		}
+	fi
+
+	update_cron || {
+		log_error "reload failed: unable to update cron tasks"
+		return 1
+	}
+	stop || {
+		log_error "reload failed: unable to stop service"
+		return 1
+	}
+	start || {
+		log_error "reload failed: unable to start service"
+		return 1
+	}
+}
+
+start_now() {
+	START_NOW=1
+	start || return 1
+	wait_for_running || {
+		log_error "start_now failed: service did not stay running"
+		return 1
+	}
+}
+
+stop_now() {
+	local rc
+
+	stop_procd_service
+	rc="$?"
+	rm -f "$FILTER_FILE"
+	return "$rc"
+}
+
+stop() {
+	stop_now
+}
+
+restart_now() {
+	stop_now || return 1
+	START_NOW=1
+	start || return 1
+	wait_for_running || {
+		log_error "restart_now failed: service did not stay running"
+		return 1
+	}
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$CONFIG"
+}
+
+cleanup_iptables_rules() {
+	local bin="$1"
+
+	command -v "$bin" >/dev/null 2>&1 || return 0
+
+	$bin -w -t mangle -F FAKEHTTP_R >/dev/null 2>&1 || true
+	$bin -w -t mangle -F FAKEHTTP_S >/dev/null 2>&1 || true
+	$bin -w -t mangle -F FAKEHTTP_D >/dev/null 2>&1 || true
+
+	while $bin -w -t mangle -D PREROUTING -j FAKEHTTP_S >/dev/null 2>&1; do :; done
+	while $bin -w -t mangle -D POSTROUTING -j FAKEHTTP_D >/dev/null 2>&1; do :; done
+
+	$bin -w -t mangle -X FAKEHTTP_R >/dev/null 2>&1 || true
+	$bin -w -t mangle -X FAKEHTTP_S >/dev/null 2>&1 || true
+	$bin -w -t mangle -X FAKEHTTP_D >/dev/null 2>&1 || true
+}
+
+cleanup_rules() {
+	nft delete table ip fakehttp >/dev/null 2>&1 || true
+	nft delete table ip6 fakehttp >/dev/null 2>&1 || true
+	cleanup_iptables_rules iptables
+	cleanup_iptables_rules ip6tables
+}

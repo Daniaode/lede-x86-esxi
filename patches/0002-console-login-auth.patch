@@ -1,0 +1,36 @@
+diff --git a/package/base-files/files/bin/config_generate b/package/base-files/files/bin/config_generate
+index d0ce472a8..c5e0a7b6b 100755
+--- a/package/base-files/files/bin/config_generate
++++ b/package/base-files/files/bin/config_generate
+@@ -314,7 +314,7 @@ generate_static_system() {
+ 		set system.@system[-1].hostname='LEDE'
+ 		set system.@system[-1].timezone='GMT0'
+ 		set system.@system[-1].zonename='UTC'
+-		set system.@system[-1].ttylogin='0'
++		set system.@system[-1].ttylogin='1'
+ 		set system.@system[-1].log_size='128'
+ 		set system.@system[-1].urandom_seed='0'
+ 
+diff --git a/package/base-files/files/etc/shadow b/package/base-files/files/etc/shadow
+index 39bdb9c90..9acd09822 100644
+--- a/package/base-files/files/etc/shadow
++++ b/package/base-files/files/etc/shadow
+@@ -1,4 +1,4 @@
+-root:::0:99999:7:::
++root:$1$V4UetPzk$CYXluq4wUazHjmCDBCqXF.:0:99999:7:::
+ daemon:*:0:0:99999:7:::
+ ftp:*:0:0:99999:7:::
+ network:*:0:0:99999:7:::
+diff --git a/package/base-files/luci/bin/config_generate b/package/base-files/luci/bin/config_generate
+index 7e0dc62b9..ea422a72b 100755
+--- a/package/base-files/luci/bin/config_generate
++++ b/package/base-files/luci/bin/config_generate
+@@ -298,7 +298,7 @@ generate_static_system() {
+ 		add system system
+ 		set system.@system[-1].hostname='LEDE'
+ 		set system.@system[-1].timezone='UTC'
+-		set system.@system[-1].ttylogin='0'
++		set system.@system[-1].ttylogin='1'
+ 		set system.@system[-1].log_size='128'
+ 		set system.@system[-1].urandom_seed='0'
+ 

@@ -1,0 +1,126 @@
+.fakehttp-status-meta {
+	margin-left: 1em;
+}
+
+.fakehttp-mono {
+	font-family: monospace;
+}
+
+.fakehttp-update-panel {
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.fakehttp-update-confirm-modal,
+.fakehttp-update-confirm-modal .modal-dialog {
+	width: calc(100vw - 2em);
+	max-width: 42em;
+	box-sizing: border-box;
+}
+
+.fakehttp-update-confirm {
+	max-width: 38em;
+	overflow-wrap: anywhere;
+}
+
+.fakehttp-update-confirm .button-row {
+	display: flex;
+	gap: .5em;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	margin-top: 1em;
+}
+
+.fakehttp-update-status-text {
+	margin-left: .75em;
+	overflow-wrap: anywhere;
+}
+
+.fakehttp-update-brief-item {
+	min-width: 12em;
+	line-height: 1.6;
+}
+
+.fakehttp-update-brief-label {
+	color: var(--muted-color, #666);
+	margin-right: .5em;
+}
+
+.fakehttp-update-meta {
+	margin-bottom: .75em;
+	padding-top: 0;
+	overflow-wrap: anywhere;
+}
+
+.fakehttp-update-progress {
+	margin-top: .75em;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.fakehttp-update-progress-head {
+	display: flex;
+	gap: .75em;
+	flex-wrap: wrap;
+	align-items: center;
+	margin-bottom: .5em;
+}
+
+.fakehttp-update-log {
+	width: 100%;
+	box-sizing: border-box;
+	max-height: 20em;
+	overflow: auto;
+	white-space: pre-wrap;
+}
+
+.fakehttp-log-panel {
+	width: 100%;
+	box-sizing: border-box;
+	max-height: 32em;
+	overflow: auto;
+	white-space: pre-wrap;
+}
+
+.fakehttp-log-tabs-wrap > .cbi-tabmenu {
+	margin-bottom: .75em;
+}
+
+.fakehttp-notification-log {
+	white-space: pre-wrap;
+}
+
+.fakehttp-action-group {
+	display: flex;
+	gap: .5em;
+	flex-wrap: wrap;
+	align-items: center;
+}
+
+.fakehttp-action-footer {
+	margin-top: .5em;
+}
+
+.fakehttp-filter-help ul {
+	margin: .25em 0 0 1.25em;
+	padding-left: 1.25em;
+}
+
+.fakehttp-filter-help li {
+	margin: .15em 0;
+}
+
+.fakehttp-log-value,
+.fakehttp-log-field {
+	display: block;
+}
+
+.fakehttp-log-field {
+	width: 100%;
+	margin-left: 0;
+}
+
+.cbi-section-table {
+	width: 100%;
+	box-sizing: border-box;
+}

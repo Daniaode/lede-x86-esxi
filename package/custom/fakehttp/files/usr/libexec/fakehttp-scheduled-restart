@@ -1,0 +1,95 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /usr/share/fakehttp/functions.sh
+
+NAME="fakehttp"
+CONFIG="fakehttp"
+SECTION="main"
+RUN_DIR="/var/run/fakehttp"
+STAMP_FILE="$RUN_DIR/restart.stamp"
+
+log_msg() {
+	local level="$1"
+
+	shift
+	logger -t "$NAME" -p "daemon.$level" "$*"
+}
+
+log_error() {
+	log_msg err "ERROR: $*"
+}
+
+log_notice() {
+	log_msg notice "$*"
+}
+
+load_settings() {
+	config_load "$CONFIG"
+	config_get_bool enabled "$SECTION" enabled 0
+	config_get_bool scheduled_restart "$SECTION" scheduled_restart 0
+	config_get restart_mode "$SECTION" restart_mode "daily"
+	config_get restart_interval_hours "$SECTION" restart_interval_hours "24"
+}
+
+restart_fakehttp() {
+	local output rc
+
+	log_notice "executing scheduled restart ($1)"
+	output="$(/etc/init.d/fakehttp restart 2>&1)" && return 0
+
+	rc="$?"
+	log_error "scheduled restart failed ($1), exit code $rc"
+	[ -n "$output" ] && printf '%s\n' "$output" | logger -t "$NAME" -p daemon.err
+	return "$rc"
+}
+
+run_interval() {
+	local now last interval elapsed rc
+
+	is_uint "$restart_interval_hours" || exit 0
+	[ "$restart_interval_hours" -ge 1 ] && [ "$restart_interval_hours" -le 168 ] || exit 0
+
+	mkdir -p "$RUN_DIR"
+	now="$(date +%s)"
+	last="$(cat "$STAMP_FILE" 2>/dev/null)"
+
+	if ! is_uint "$last"; then
+		echo "$now" > "$STAMP_FILE"
+		exit 0
+	fi
+
+	interval=$((restart_interval_hours * 3600))
+	elapsed=$((now - last))
+
+	[ "$elapsed" -ge "$interval" ] || exit 0
+
+	restart_fakehttp "interval"
+	rc="$?"
+	date +%s > "$STAMP_FILE"
+	exit "$rc"
+}
+
+requested_mode="$1"
+
+case "$requested_mode" in
+	daily|weekly|interval) ;;
+	*) exit 0 ;;
+esac
+
+load_settings
+
+[ "$enabled" -eq 1 ] || exit 0
+[ "$scheduled_restart" -eq 1 ] || exit 0
+[ "$restart_mode" = "$requested_mode" ] || exit 0
+
+case "$requested_mode" in
+	interval)
+		run_interval
+		;;
+	daily|weekly)
+		restart_fakehttp "$requested_mode" || exit "$?"
+		;;
+esac
+
+exit 0

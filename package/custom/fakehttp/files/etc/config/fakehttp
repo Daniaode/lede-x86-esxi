@@ -1,0 +1,32 @@
+config fakehttp 'main'
+	option enabled '0'
+
+	option interface_mode 'custom'
+	list interfaces 'wan'
+
+	option direction 'both'
+	option ip_family 'both'
+
+	option queue_num '100'
+	option fwmark '0x8000'
+	option fwmask ''
+	option repeat '2'
+	option ttl '3'
+	option dynamic_pct ''
+	option disable_hop_estimation '0'
+	option skip_firewall '0'
+	option use_iptables '0'
+	option silent '1'
+	option log_file '/var/log/fakehttp/fakehttp.log'
+	option log_max_size '1M'
+	option log_rotate_count '3'
+
+	option scheduled_restart '0'
+	option restart_mode 'daily'
+	option restart_time '04:00'
+	option restart_weekday '0'
+	option restart_interval_hours '24'
+
+config payload
+	option type 'http'
+	option value 'www.speedtest.cn'

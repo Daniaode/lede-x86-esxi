@@ -1,0 +1,134 @@
+#!/bin/sh
+
+NAME="fakehttp"
+CONFIG="fakehttp"
+SECTION="main"
+DEFAULT_LOG_FILE="/var/log/fakehttp/fakehttp.log"
+DEFAULT_LINES="200"
+MAX_LINES="1000"
+MAX_BYTES="262144"
+DEFAULT_ROTATE_COUNT="3"
+
+. /lib/functions.sh
+. /usr/share/fakehttp/functions.sh
+
+sanitize_lines() {
+	local lines="$1"
+
+	is_uint "$lines" || lines="$DEFAULT_LINES"
+	[ "$lines" -ge 1 ] || lines="$DEFAULT_LINES"
+	[ "$lines" -le "$MAX_LINES" ] || lines="$MAX_LINES"
+
+	echo "$lines"
+}
+
+get_log_file() {
+	local log_file
+
+	config_load "$CONFIG"
+	config_get log_file "$SECTION" log_file "$DEFAULT_LOG_FILE"
+
+	fakehttp_validate_log_path "$log_file" || return 1
+
+	echo "$log_file"
+}
+
+get_log_rotate_count() {
+	local log_rotate_count
+
+	config_load "$CONFIG"
+	config_get log_rotate_count "$SECTION" log_rotate_count "$DEFAULT_ROTATE_COUNT"
+
+	is_uint "$log_rotate_count" || log_rotate_count="$DEFAULT_ROTATE_COUNT"
+	[ "$log_rotate_count" -ge 0 ] || log_rotate_count=0
+	[ "$log_rotate_count" -le 1000 ] || log_rotate_count=1000
+
+	echo "$log_rotate_count"
+}
+
+list_rotated_logs() {
+	local log_file="$1"
+	local limit="$2"
+	local dir base
+
+	dir="${log_file%/*}"
+	base="${log_file##*/}"
+
+	[ "$limit" -gt 0 ] || return 0
+	[ -d "$dir" ] || return 0
+
+	find "$dir" -maxdepth 1 -type f -name "$base.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]*" 2>/dev/null |
+		sort |
+		tail -n "$limit"
+}
+
+get_file_size() {
+	stat -c %s "$1" 2>/dev/null || wc -c < "$1" 2>/dev/null || echo 0
+}
+
+list_log_files() {
+	local log_file="$1"
+	local rotate_count="$2"
+
+	list_rotated_logs "$log_file" "$rotate_count"
+	[ -f "$log_file" ] && echo "$log_file"
+}
+
+select_recent_log_files() {
+	local log_file="$1"
+	local rotate_count="$2"
+	local total=0 path size
+
+	list_log_files "$log_file" "$rotate_count" |
+		sed '1!G;h;$!d' |
+		while IFS= read -r path; do
+			[ -f "$path" ] || continue
+			size="$(get_file_size "$path")"
+			is_uint "$size" || size=0
+			printf '%s\n' "$path"
+			total=$((total + size))
+			[ "$total" -ge "$MAX_BYTES" ] && break
+		done |
+		sed '1!G;h;$!d'
+}
+
+read_file_log() {
+	local lines="$1"
+	local log_file rotate_count selected_logs
+
+	log_file="$(get_log_file)" || {
+		echo "文件日志未启用或路径无效"
+		return 0
+	}
+
+	rotate_count="$(get_log_rotate_count)"
+	selected_logs="$(select_recent_log_files "$log_file" "$rotate_count")"
+
+	if [ -z "$selected_logs" ]; then
+		echo "日志文件不存在：$log_file"
+		return 0
+	fi
+
+	printf '%s\n' "$selected_logs" | while IFS= read -r path; do
+		[ -f "$path" ] && tail -c "$MAX_BYTES" "$path"
+	done 2>/dev/null | tail -c "$MAX_BYTES" | tail -n "$lines"
+}
+
+read_system_log() {
+	local lines="$1"
+
+	/sbin/logread -e "$NAME" 2>/dev/null | tail -n "$lines"
+}
+
+case "$1" in
+	file)
+		read_file_log "$(sanitize_lines "$2")"
+		;;
+	system)
+		read_system_log "$(sanitize_lines "$2")"
+		;;
+	*)
+		echo "Usage: $0 {file|system} [lines]" >&2
+		exit 1
+		;;
+esac

@@ -9,7 +9,10 @@
 - 引导：GRUB（BIOS + EFI 双支持）
 - 根分区：2048 MiB
 - 防火墙后端：firewall4 + nftables
-- 包总数：553
+- 包总数：573
+- 控制台登录：需账号密码（默认 `root` / `password`，**请首启后立即修改**）
+
+各版本变更见 [Releases](../../releases)。最新为 v2，新增 FakeHTTP、PPPoE 穿透、OpenClash、taskplan，移除 WOL。
 
 ## 仓库内容
 
@@ -17,6 +20,7 @@
 |---|---|
 | `seed.config` | 构建使用的完整 `.config`（可直接 `cp` 后 `make defconfig -j$(nproc)`） |
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
+| `patches/0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
 | `manifest/` | 最终固件的软件包清单，可用于核对 |
 | `scripts/build.sh` | 完整构建脚本（下载 + 编译，失败自动 `-j1 V=s` 重试） |
