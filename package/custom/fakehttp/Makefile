@@ -5,16 +5,14 @@ PKG_VERSION:=0.9.18
 PKG_RELEASE:=1
 
 PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/MikeWang000000/FakeHTTP.git
-PKG_SOURCE_DATE:=2025-06-27
-PKG_SOURCE_VERSION:=eda98bb4942dcf2038205faaaaf256a765b279b3
+PKG_SOURCE_URL:=https://github.com/killadm/FakeHTTP.git
+PKG_SOURCE_DATE:=2026-07-23
+PKG_SOURCE_VERSION:=59977c07f07b62c4bf15293c21e40bc3f9730b00
 PKG_MIRROR_HASH:=skip
 
-PKG_MAINTAINER:=MikeWang000000
+PKG_MAINTAINER:=FakeHTTP LuCI feed
 PKG_LICENSE:=GPL-3.0-or-later
 PKG_LICENSE_FILES:=LICENSE
-
-PKG_BUILD_PARALLEL:=1
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -23,15 +21,13 @@ define Package/fakehttp
   CATEGORY:=Network
   SUBMENU:=Firewall
   TITLE:=Obfuscate TCP connections into HTTP with NFQUEUE
-  URL:=https://github.com/MikeWang000000/FakeHTTP
-  DEPENDS:=+libpthread +libnetfilter-queue +libnfnetlink +libmnl \
-	+nftables +iptables +kmod-nfnetlink-queue +kmod-nft-queue \
-	+kmod-ipt-nfqueue
+  URL:=https://github.com/killadm/FakeHTTP
+  DEPENDS:=+ca-bundle +uclient-fetch +libpthread +libnetfilter-queue +libnfnetlink +libmnl +nftables +kmod-nfnetlink-queue +kmod-nft-queue
 endef
 
 define Package/fakehttp/description
- FakeHTTP obfuscates TCP connections into HTTP-like traffic by handling
- packets through Netfilter Queue (NFQUEUE).
+FakeHTTP obfuscates TCP connections into HTTP-like traffic by handling
+packets through Netfilter Queue.
 endef
 
 define Package/fakehttp/conffiles
@@ -42,7 +38,7 @@ define Build/Compile
 	$(MAKE) -C $(PKG_BUILD_DIR) \
 		CC="$(TARGET_CC)" \
 		STRIP="$(TARGET_CROSS)strip" \
-		CFLAGS="$(TARGET_CFLAGS) $(TARGET_CPPFLAGS) -I$(PKG_BUILD_DIR)/include" \
+		CFLAGS="$(TARGET_CFLAGS) $(TARGET_CPPFLAGS)" \
 		LDFLAGS="$(TARGET_LDFLAGS)" \
 		PREFIX="/usr" \
 		VERSION="$(PKG_VERSION)"

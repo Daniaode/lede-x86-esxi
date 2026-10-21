@@ -10,15 +10,17 @@
 - 根分区：2048 MiB
 - 防火墙后端：firewall4 + nftables
 - 包总数：573
+- 镜像压缩：gzip（`.img.gz`）
 - 控制台登录：需账号密码（默认 `root` / `password`，**请首启后立即修改**）
 
-各版本变更见 [Releases](../../releases)。最新为 v2，新增 FakeHTTP、PPPoE 穿透、OpenClash、taskplan，移除 WOL。
+各版本变更见 [Releases](../../releases)。最新为 **v3**：产物改为 gzip 压缩、FakeHTTP 切换到 killadm 加固分支（含 24 项安全与稳定性修复）、构建配置与仓库同步。
 
 ## 仓库内容
 
 | 路径 | 说明 |
 |---|---|
 | `seed.config` | 构建使用的完整 `.config`（可直接 `cp` 后 `make defconfig -j$(nproc)`） |
+| `RELEASE_NOTES_v3.md` | v3 变更说明、24 项 FakeHTTP 修复清单、完整软件包列表 |
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
 | `patches/0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
@@ -91,7 +93,9 @@ make download -j8
 make -j$(nproc)
 ```
 
-产物位于 `bin/targets/x86/64/`。
+产物位于 `bin/targets/x86/64/`。开启 `CONFIG_TARGET_IMAGES_GZIP=y` 后会同时产出 `.img.gz`。
+
+> **注意**：`package/custom/fakehttp/Makefile` 锁定 `killadm/FakeHTTP` 的 `59977c07` 提交。该仓库是 `MikeWang000000/FakeHTTP` 的 fork，领先上游 24 个提交，含内存安全、协议解析加固、防火墙规则原子安装等修复。
 
 ## ESXi 7.0 导入
 
@@ -120,7 +124,8 @@ sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
 - 硬件加速不可用：x86 平台没有 NSS / MTK HNAT / SFE 等专用转发引擎，只能使用软件 flow offloading。
 - FullCone NAT 需在 TurboAcc 界面手动开启（自动探测只识别 `xt_FULLCONENAT.ko`，本固件使用 `nft_fullcone.ko`）。
 - passwall 与 ssr-plus 功能重叠，建议实际使用时只启用一个。
-- 固件未经实体机 / ESXi 启动验证；IPv6 拨号、加速吞吐、WireGuard 握手均未实测。
+- 固件已在 QEMU/KVM 中完成真实引导验证（内核、网络、服务、LuCI 均正常）；实体机 / ESXi 环境、IPv6 拨号、加速吞吐、WireGuard 握手仍未实测。
+- QEMU 验证环境中 `firewall` 显示未运行，因单网卡全部划入 LAN、无 WAN 接口导致 fw4 提前退出；ESXi 双网口环境不受影响，首启后建议 `fw4 print` 确认。
 
 ## 许可
 
