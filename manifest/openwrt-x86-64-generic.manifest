@@ -15,11 +15,9 @@ busybox - 1.38.0-2
 bzip2 - 1.0.8-1
 ca-bundle - 20260601-1
 ca-certificates - 20260601-1
-cfdisk - 2.42.2-1
 cgi-io - 2022-08-10-901b0f04-21
-chinadns-ng - 2025.06.20-1
+chinadns-ng - 2025.08.09-1
 conntrack - 1.4.7-1
-coremark - 2022-07-27-eefc986e-1
 coreutils - 9.3-1
 coreutils-base64 - 9.3-1
 coreutils-nohup - 9.3-1
@@ -46,6 +44,7 @@ grub2 - 2.12-6
 grub2-bios-setup - 2.12-6
 grub2-efi - 2.12-6
 haproxy - 3.2.16-1
+hysteria - 2.13.0-1
 i915-firmware - 20260910-2
 i915-firmware-dmc - 20260910-2
 i915-firmware-gsc - 20260910-2
@@ -349,7 +348,7 @@ lsblk - 2.42.2-1
 lua - 5.1.5-11
 lua-neturl - 1.2.1-1
 luci - 26.292.28058~db1769b
-luci-app-adguardhome - 26.292.28058~db1769b
+luci-app-adguardhome - 1.8-11
 luci-app-arpbind - 26.292.28058~db1769b
 luci-app-autoreboot - 26.292.28058~db1769b
 luci-app-bandix-plus - 0.1.3-r1
@@ -370,7 +369,7 @@ luci-app-passwall - 26.10.16-r2
 luci-app-pppoe-relay - 26.292.28058~db1769b
 luci-app-quickstart - 0.12.10-r1
 luci-app-ramfree - 26.292.28058~db1769b
-luci-app-ssr-plus - 196-r19
+luci-app-ssr-plus - 197-r3
 luci-app-store - 0.2.1-r1
 luci-app-syncdial - 2.0-r25
 luci-app-taskplan - 3.0.0-r20260303
@@ -400,7 +399,7 @@ luci-i18n-passwall-zh-cn - 26.10.16
 luci-i18n-pppoe-relay-zh-cn - 26.292.28058~db1769b
 luci-i18n-quickstart-zh-cn - 0
 luci-i18n-ramfree-zh-cn - 26.292.28058~db1769b
-luci-i18n-ssr-plus-zh-cn - 26.291.24264~0d24da0
+luci-i18n-ssr-plus-zh-cn - 26.293.64735~cc3862b
 luci-i18n-taskplan-zh-cn - 0
 luci-i18n-ttyd-zh-cn - 26.292.28058~db1769b
 luci-i18n-turboacc-zh-cn - 26.292.28058~db1769b
@@ -554,7 +553,7 @@ v2ray-plugin - 5.49.0-1
 wget-ssl - 1.21.3-1
 wireguard-tools - 1.0.20250521-1
 wrtbwmon - 1.2.1-3
-xray-core - 26.6.1-1
+xray-core - 26.10.17-9
 xz - 5.4.1-1
 xz-utils - 5.4.1-1
 zerotier - 1.16.0-1

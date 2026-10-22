@@ -9,18 +9,20 @@
 - 引导：GRUB（BIOS + EFI 双支持）
 - 根分区：2048 MiB
 - 防火墙后端：firewall4 + nftables
-- 包总数：573
+- 包总数：572
 - 镜像压缩：gzip（`.img.gz`）
+- AdGuardHome：默认关闭（`enabled=0`），dnsmasq 独占 53
 - 控制台登录：需账号密码（默认 `root` / `password`，**请首启后立即修改**）
 
-各版本变更见 [Releases](../../releases)。最新为 **v3**：产物改为 gzip 压缩、FakeHTTP 切换到 killadm 加固分支（含 24 项安全与稳定性修复）、构建配置与仓库同步。
+各版本变更见 [Releases](../../releases)。最新为 **v4**：AdGuardHome LuCI 替换为 rufengsuixing 版（支持 4 种重定向模式，默认关闭）、xray-core 升级至 26.10.17、chinadns-ng 升级至 2025.08.09、新增 Hysteria 2.13.0、移除 coremark/cfdisk。
 
 ## 仓库内容
 
 | 路径 | 说明 |
 |---|---|
 | `seed.config` | 构建使用的完整 `.config`（可直接 `cp` 后 `make defconfig -j$(nproc)`） |
-| `RELEASE_NOTES_v3.md` | v3 变更说明、24 项 FakeHTTP 修复清单、完整软件包列表 |
+| `RELEASE_NOTES_v4.md` | v4 变更说明、AdGuardHome 替换细节、代理内核升级、完整软件包列表 |
+| `RELEASE_NOTES_v3.md` | v3 变更说明、24 项 FakeHTTP 修复清单 |
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
 | `patches/0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
