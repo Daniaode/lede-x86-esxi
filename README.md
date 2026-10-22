@@ -13,6 +13,7 @@
 - 镜像压缩：gzip（`.img.gz`）
 - AdGuardHome：默认关闭（`enabled=0`），dnsmasq 独占 53
 - 控制台登录：需账号密码（默认 `root` / `password`，**请首启后立即修改**）
+- 升级安全：`etc/init.d/fix-root-shadow` 开机自检，空密码字段自动修复（v5+）
 
 各版本变更见 [Releases](../../releases)。最新为 **v4**：AdGuardHome LuCI 替换为 rufengsuixing 版（支持 4 种重定向模式，默认关闭）、xray-core 升级至 26.10.17、chinadns-ng 升级至 2025.08.09、新增 Hysteria 2.13.0、移除 coremark/cfdisk。
 
@@ -25,6 +26,7 @@
 | `RELEASE_NOTES_v3.md` | v3 变更说明、24 项 FakeHTTP 修复清单 |
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
 | `patches/0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
+| `patches/0003-fix-root-shadow.patch` | 开机自检，修复 sysupgrade 保留空密码导致的登录锁死（v5+） |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
 | `manifest/` | 最终固件的软件包清单，可用于核对 |
 | `scripts/build.sh` | 完整构建脚本（下载 + 编译，失败自动 `-j1 V=s` 重试） |

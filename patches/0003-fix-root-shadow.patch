@@ -1,0 +1,46 @@
+diff --git a/package/base-files/files/etc/init.d/fix-root-shadow b/package/base-files/files/etc/init.d/fix-root-shadow
+new file mode 100755
+index 000000000..2ba5062ee
+--- /dev/null
++++ b/package/base-files/files/etc/init.d/fix-root-shadow
+@@ -0,0 +1,40 @@
++#!/bin/sh /etc/rc.common
++# Guard against a locked-out console after sysupgrade.
++#
++# /etc/shadow is listed in lib/upgrade/keep.d/base-files-essential, which
++# means sysupgrade preserves it unconditionally -- even with -n.  Upgrading
++# from a build whose root password field was empty (the pre-auth v1 image
++# ships `root:::`) therefore keeps an empty hash, while ttylogin=1 turns the
++# login prompt on.  The result is a console that shows "Login:" but rejects
++# every password, including an empty one.
++#
++# This runs early on every boot and only acts when the field is empty.
++# `*`, `!`, `x` and existing hashes are left untouched.
++
++START=05
++
++CANON='root:$1$V4UetPzk$CYXluq4wUazHjmCDBCqXF.:0:99999:7:::'
++
++start() {
++	[ -f /etc/shadow ] || return 0
++
++	local cur
++	cur=$(awk -F: '$1=="root"{print $2; exit}' /etc/shadow 2>/dev/null)
++
++	# Non-empty means a real hash or an intentional lock; do nothing.
++	[ -z "$cur" ] || return 0
++
++	logger -t fix-root-shadow "root password field is empty, restoring default"
++	# Replace the whole line: `root:::` has a different field count than a
++	# hashed entry, so rewriting only the password field would leave extra
++	# colons behind.
++	awk -v line="$CANON" -F: 'BEGIN{OFS=":"} $1=="root"{print line; next} {print}' \
++		/etc/shadow > /etc/shadow.new 2>/dev/null || return 0
++	[ -s /etc/shadow.new ] || { rm -f /etc/shadow.new; return 0; }
++
++	chmod 600 /etc/shadow.new
++	mv /etc/shadow.new /etc/shadow
++	sync
++}
++
++boot() { start; }
