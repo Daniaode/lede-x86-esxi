@@ -13,20 +13,19 @@
 - 镜像压缩：gzip（`.img.gz`）
 - AdGuardHome：默认关闭（`enabled=0`），dnsmasq 独占 53
 - 控制台登录：需账号密码（默认 `root` / `password`，**请首启后立即修改**）
-- 升级安全：`etc/init.d/fix-root-shadow` 开机自检，空密码字段自动修复（v5+）
+- 升级安全：`etc/init.d/fix-root-shadow` 开机自检，空密码 / 短字段数自动修复
 
-各版本变更见 [Releases](../../releases)。最新为 **v4**：AdGuardHome LuCI 替换为 rufengsuixing 版（支持 4 种重定向模式，默认关闭）、xray-core 升级至 26.10.17、chinadns-ng 升级至 2025.08.09、新增 Hysteria 2.13.0、移除 coremark/cfdisk。
+各版本变更见 [Releases](../../releases)。最新为 **v6**：修复 musl 下 shadow 8 字段导致任何密码都无法登录的缺陷（模板与 CANON 均改为 9 字段，开机脚本增加短字段数规范化），已完成 ESXi 实机新装 + 升级双向验证。
 
 ## 仓库内容
 
 | 路径 | 说明 |
 |---|---|
 | `seed.config` | 构建使用的完整 `.config`（可直接 `cp` 后 `make defconfig -j$(nproc)`） |
-| `RELEASE_NOTES_v4.md` | v4 变更说明、AdGuardHome 替换细节、代理内核升级、完整软件包列表 |
-| `RELEASE_NOTES_v3.md` | v3 变更说明、24 项 FakeHTTP 修复清单 |
+| `RELEASE_NOTES.md` | 当前版本（v6）完整变更说明与验证记录 |
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
 | `patches/0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
-| `patches/0003-fix-root-shadow.patch` | 开机自检，修复 sysupgrade 保留空密码导致的登录锁死（v5+） |
+| `patches/0003-fix-root-shadow.patch` | 开机自检：修复空密码与 <9 字段的 shadow 条目 |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
 | `manifest/` | 最终固件的软件包清单，可用于核对 |
 | `scripts/build.sh` | 完整构建脚本（下载 + 编译，失败自动 `-j1 V=s` 重试） |
@@ -128,8 +127,8 @@ sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
 - 硬件加速不可用：x86 平台没有 NSS / MTK HNAT / SFE 等专用转发引擎，只能使用软件 flow offloading。
 - FullCone NAT 需在 TurboAcc 界面手动开启（自动探测只识别 `xt_FULLCONENAT.ko`，本固件使用 `nft_fullcone.ko`）。
 - passwall 与 ssr-plus 功能重叠，建议实际使用时只启用一个。
-- 固件已在 QEMU/KVM 中完成真实引导验证（内核、网络、服务、LuCI 均正常）；实体机 / ESXi 环境、IPv6 拨号、加速吞吐、WireGuard 握手仍未实测。
-- QEMU 验证环境中 `firewall` 显示未运行，因单网卡全部划入 LAN、无 WAN 接口导致 fw4 提前退出；ESXi 双网口环境不受影响，首启后建议 `fw4 print` 确认。
+- 固件已在 ESXi 6.7.0 实机完成新装 + sysupgrade 双向验证：GRUB 引导、内核 6.18.55、双 vmxnet3 网口、open-vm-tools、root 登录（正确密码通过 / 错误密码拒绝）、dropbear 22 LISTEN 均已实测通过。
+- IPv6 拨号、加速吞吐、WireGuard 握手、各代理插件运行态仍未实测。
 
 ## 许可
 
