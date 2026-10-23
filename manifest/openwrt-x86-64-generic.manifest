@@ -5,7 +5,7 @@ amdgpu-firmware - 20260910-2
 autocore-x86 - 84
 automount - 1-41
 bandix-plus - 0.1.2-1
-base-files - 127-r8194-07cebbcf2
+base-files - 127-r8199-cbe28467f
 bash - 5.2.15-1
 bc - 1.06.95-1
 block-mount - 2026-07-25-2aa16407-1
@@ -361,6 +361,7 @@ luci-app-frpc - 26.292.28058~db1769b
 luci-app-mwan3 - 26.292.28058~db1769b
 luci-app-natter2 - 1.0-r5
 luci-app-nlbwmon - 26.292.28058~db1769b
+luci-app-online-update - 1.0.0-r1
 luci-app-onliner - 1.1-r5
 luci-app-openclash - 0.48.002
 luci-app-oui - 1.0.9-r1
@@ -393,6 +394,7 @@ luci-i18n-frpc-zh-cn - 26.292.28058~db1769b
 luci-i18n-mwan3-zh-cn - 26.292.28058~db1769b
 luci-i18n-natter2-zh-cn - 0
 luci-i18n-nlbwmon-zh-cn - 26.292.28058~db1769b
+luci-i18n-online-update-zh-cn - 0
 luci-i18n-onliner-zh-cn - 0
 luci-i18n-package-manager-zh-cn - 26.292.28058~db1769b
 luci-i18n-passwall-zh-cn - 26.10.16

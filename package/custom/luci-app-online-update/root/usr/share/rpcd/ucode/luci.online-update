@@ -1,0 +1,82 @@
+#!/usr/bin/ucode
+
+'use strict';
+
+import { popen, access } from 'fs';
+
+const HELPER = '/usr/sbin/online-update';
+
+/* Only these verbs may be invoked from LuCI. Anything else is refused. */
+const ALLOWED = {
+	status:    { args: 0 },
+	check:     { args: 0 },
+	jobstatus: { args: 0 },
+	apply:     { args: 0 },
+	cleanup:   { args: 0 },
+	download:  { args: 0 },
+	ignore:    { args: 1 },
+	unignore:  { args: 1 }
+};
+
+function shellquote(s) {
+	return "'" + replace(s, "'", "'\\''") + "'";
+}
+
+/* Tag arguments come from GitHub but are still validated: a release tag is
+   v<digits>-<alnum>, so anything else is a bug or an injection attempt. */
+function valid_tag(t) {
+	return match(t, /^v[0-9]+-[A-Za-z0-9._-]+$/) != null;
+}
+
+function run(argv) {
+	let parts = map(argv, shellquote);
+	return popen(HELPER + ' ' + join(' ', parts));
+}
+
+const methods = {
+	exec: {
+		args: { command: 'string', args: [] },
+		call: function(request) {
+			const result = { stdout: '', stderr: '', code: 1 };
+			/* rpcd nests the declared args under request.args, so an
+			   unqualified request.command is always nil and every lookup
+			   would fall through to "not allowed". */
+			const params = request.args || {};
+			const cmd = params.command;
+			const spec = ALLOWED[cmd];
+
+			if (spec == null) {
+				result.stderr = 'command not allowed';
+				return result;
+			}
+
+			if (!access(HELPER, 'x')) {
+				result.stderr = 'helper missing';
+				return result;
+			}
+
+			const extra = params.args || [];
+
+			if (length(extra) != spec.args) {
+				result.stderr = 'bad argument count';
+				return result;
+			}
+
+			if (spec.args == 1 && !valid_tag(extra[0])) {
+				result.stderr = 'invalid tag';
+				return result;
+			}
+
+			const argv = [ cmd ];
+			for (let i = 0; i < length(extra); i++)
+				push(argv, extra[i]);
+
+			const fd = run(argv);
+			result.stdout = fd.read('all') || '';
+			result.code = fd.close();
+			return result;
+		}
+	}
+};
+
+return { 'luci.online-update': methods };

@@ -15,7 +15,7 @@
 - 控制台登录：需账号密码（默认 `root` / `password`，**请首启后立即修改**）
 - 升级安全：`etc/init.d/fix-root-shadow` 开机自检，空密码 / 短字段数自动修复
 
-各版本变更见 [Releases](../../releases)。最新为 **v6**：修复 musl 下 shadow 8 字段导致任何密码都无法登录的缺陷（模板与 CANON 均改为 9 字段，开机脚本增加短字段数规范化），已完成 ESXi 实机新装 + 升级双向验证。
+各版本变更见 [Releases](../../releases)。最新为 **v7**：新增固件在线更新（LuCI 横幅 + 独立页面 + SHA256 校验），修复控制台早期免密登录漏洞（login.sh 由 fail-open 改为 fail-closed）。
 
 ## 仓库内容
 
@@ -26,6 +26,7 @@
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
 | `patches/0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
 | `patches/0003-fix-root-shadow.patch` | 开机自检：修复空密码与 <9 字段的 shadow 条目 |
+| `patches/0004-fixed-login-failopen.patch` | login.sh 改为 fail-closed，修复控制台早期免密登录 |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
 | `manifest/` | 最终固件的软件包清单，可用于核对 |
 | `scripts/build.sh` | 完整构建脚本（下载 + 编译，失败自动 `-j1 V=s` 重试） |

@@ -1,224 +1,166 @@
-# v6 — 修复 musl 下 shadow 8 字段导致的登录失败
+# v7 — 在线更新功能 + 控制台登录漏洞修复
 
-**此版本取代 v1–v5 全部历史版本。旧版本的镜像存在登录缺陷，请勿使用。**
-
----
-
-## 一、为什么发这一版
-
-之前发布的 v2–v5 镜像里，控制台会出现 `Login:` 提示，但 `root` / `password` 输入后始终 `Login incorrect`。v5 曾尝试用开机脚本修复"空密码"场景，但**没有解决真正的根因**，而且 v5 镜像内的 `CANON` 常量本身仍是 8 字段——一旦触发反而会把登录再次写坏。
-
-本次定位到真正的机制并验证通过。
+**此版本取代全部历史版本。** 除新增在线更新能力外，还修复了一个**安全缺陷**：控制台在早期启动阶段可免密进入 root shell。
 
 ---
 
-## 二、根因
+## 一、新增：固件在线更新
 
-### 2.1 musl 的 shadow 解析比 glibc 严格
+在路由器上直接检查并安装新固件，无需手动下载刷写。
 
-musl 1.2.5 的 `getspnam_r.c` 中 `__parsespent()` 在解析完 `sp_expire` 字段后要求：
+### 功能
 
-```c
-if (*s != ':') return -1;
-```
+- **版本检测**：读取 GitHub Releases API，与本机构建时烧入的版本号比对
+- **三种选择**：在线更新 / 自行下载 / 不再提示
+- **按版本忽略**：忽略 v7 不代表不想知道 v8，总开关另设
+- **手动检查**：`系统 → 在线更新`，忽略后随时可恢复提示
+- **自动检查**：开机 60 秒后首查，此后每 24 小时（可配置）
 
-OpenWrt 上游模板 `/etc/shadow` 用的是 **glibc 风格 8 字段**：
+### 界面
 
-```
-root:HASH:0:99999:7:::
-```
+- 概览页顶部横幅（仅在有新版且未忽略时显示）
+- 独立菜单 `系统 → 在线更新`：当前/最新版本、检查按钮、间隔设置、忽略列表
 
-musl 解析到 `sp_expire`（`7`）后面发现直接是行尾，没有冒号，**判定整行无效**：
+### 安全
 
-- `getspnam()` 返回 `NULL`
-- `login` 与 `dropbear` 都拿不到哈希
-- 任何密码（包括正确密码、空密码）都 → `Login incorrect`
+| 措施 | 实现 |
+|---|---|
+| 来源固定 | 仓库地址硬编码，无任何 URL 参数入口 |
+| 文件名白名单 | 只接受 `openwrt-x86-64-generic-squashfs-combined*.img.gz` |
+| URL 校验 | 必须是 `github.com/*/releases/download/*` |
+| SHA256 | 与同一 Release 的 `RELEASE_SHA256SUMS` 比对，不符即删文件中止 |
+| 二次校验 | sysupgrade 前再次计算哈希，防止下载后被替换 |
+| 显式确认 | 下载与安装分两步，均需用户点击；无静默自动刷写 |
 
-glibc 对这种短行是宽容的，所以上游模板一直没暴露问题——它在 glibc 环境下工作正常，只在 musl 目标上失效。
+### 已知边界
 
-### 2.2 实证
-
-用固件自身工具链编译的静态测试程序 `/root/sptest` 直接调用 musl 的解析逻辑：
-
-| shadow 行 | 字段数 | `parsed` |
-|---|---|---|
-| `root:HASH:0:99999:7:::` | 8 | **0（失败）** |
-| `root:HASH:0:99999:7::::` | 9 | **1（成功）** |
-
-差别就是一个末尾冒号。
+SHA256 与固件同源（同一 Release），可防传输损坏与单文件替换，防不住整个 Release 被攻陷。如需更强保证应加 GPG 签名，本版未做。
 
 ---
 
-## 三、修复内容
+## 二、修复：控制台免密登录（安全缺陷）
 
-### 修复 1：模板改为 9 字段
+### 现象
 
-`package/base-files/files/etc/shadow` 每行补一个冒号：
+串口 / VGA 控制台在**开机早期**直接落入 root shell，不要求密码。
 
-```
-root:$1$V4UetPzk$CYXluq4wUazHjmCDBCqXF.:0:99999:7::::
-daemon:*:0:0:99999:7::::
-ftp:*:0:0:99999:7::::
-```
+### 根因
 
-### 修复 2：开机脚本同时处理两种缺陷
-
-`package/base-files/files/etc/init.d/fix-root-shadow`（`START=05`）：
+`package/base-files/files/usr/libexec/login.sh` 原本是 **fail-open**：
 
 ```sh
-CANON='root:$1$V4UetPzk$CYXluq4wUazHjmCDBCqXF.:0:99999:7::::'
+[ "$(uci -q get system.@system[0].ttylogin)" = 1 ] || exec /bin/ash --login
 ```
 
-判断逻辑：
+`/etc/config/system` **不在镜像里**，由 `config_generate` 在 boot 服务中生成。`askfirst` 启动的 `login.sh` 早于该文件生成，`uci get` 返回空 → 条件不成立 → 直接 `exec /bin/ash --login`。
 
-| 检测到 | 动作 |
-|---|---|
-| root 密码字段为空 | 整行替换为 CANON（恢复默认哈希） |
-| 字段数 < 9（如 v4 的 8 字段） | 整行替换为 CANON（规范化） |
-| 字段数 ≥ 9 且有哈希 | 不动 |
-| `*` / `!` 主动锁定 | 不动（尊重管理意图） |
+登录提示要等 `config_generate` 跑完才出现，但**第一个控制台已经是免密 shell**。
 
-**为什么整行替换**：`root:::` 与带哈希的条目字段数不同，若只改密码字段会残留多余冒号，产出畸形条目。整行输出保证与基准行逐字节一致。
+### 修复
 
-**为什么覆盖 8 字段场景**：只处理空密码的话，从 v4（8 字段）升级上来的机器不会触发修复，仍然锁死。必须增加字段数检查。
+改为 **fail-closed**：
+
+```sh
+[ "$(uci -q get system.@system[0].ttylogin)" = 0 ] && exec /bin/ash --login
+exec /bin/login
+```
+
+未设置值时走 `/bin/login`，要求密码。只有显式 `ttylogin=0` 才免密。
+
+### 为什么 v6 测试没发现
+
+v6 的 ESXi 验证用的是 `govc guest.run`，走 VMware Tools 凭据通道，**根本不经过串口控制台**。本次改用 QEMU 串口直连才发现。
+
+---
+
+## 三、其它修复
+
+### 包内脚本缺少可执行位
+
+`luci-app-online-update` 的 `online-update`、init 脚本、ucode 对象权限为 `644`，导致无法执行。已改为 `755`。
+
+### ucode RPC 参数取值错误
+
+```ucode
+const cmd = request.command;   // 永远 nil
+```
+
+rpcd 把声明的参数嵌套在 `request.args` 下，正确写法是 `request.args.command`。原实现导致**所有命令**（包括允许的 `status`）都返回 `command not allowed`。
 
 ---
 
 ## 四、验证结果
 
-### 4.1 静态核验
-
-从最终产物解包确认：
-
-```
-/etc/shadow                      → 9 字段 ✓
-/etc/init.d/fix-root-shadow      → CANON 9 字段 ✓
-/etc/rc.d/S05fix-root-shadow     → 已自动 enable ✓
-包总数                            → 572
-```
-
-### 4.2 ESXi 实机验证（阶段 1：新装）
-
-在 ESXi 6.7.0（172.16.99.1）上创建干净虚拟机：
-
-| 项 | 配置 |
-|---|---|
-| 磁盘 | squashfs-combined.img → monolithicFlat VMDK，lsilogic |
-| 虚拟机硬件版本 | 11（hw14 在此 ESXi 上 vmxnet3 无法分配 PCIe 槽位） |
-| CPU / 内存 | 2 vCPU / 1024 MB |
-| 网卡 | 双 vmxnet3（LAN: LEDE-TEST-INT，WAN: VM Network） |
-| 固件 | BIOS |
-
-**实测结果，全部通过：**
+### QEMU（真实引导）
 
 | 检查项 | 结果 |
 |---|---|
-| GRUB 引导 | ✅ |
-| 内核启动 | ✅ `6.18.55` |
-| 双网口 up | ✅ `br-lan 192.168.1.1` / `eth1 172.16.99.211` |
-| open-vm-tools | ✅ `vmtoolsd RUNNING` |
-| **`root:password` 登录** | ✅ **成功** |
-| **`root:wrongpass` 登录** | ✅ **被拒绝** |
+| 控制台出现 `login:` 提示 | ✅ |
+| 错误密码被拒 | ✅ `Login incorrect` |
+| 正确密码进入 shell | ✅ |
+| SSH `root:password` | ✅ |
+| 内核 | ✅ `6.18.55` |
 | shadow 字段数 | ✅ 9 |
-| dropbear 22 LISTEN | ✅ `0.0.0.0:22` + `:::22` |
-| `S05fix-root-shadow` | ✅ 已启用 |
+| `ttylogin` | ✅ 1 |
 
-### 4.3 ESXi 实机验证（阶段 2：升级）
-
-在测试机 `lede-openwrt` 上执行：
-
-1. 恢复快照 `20261022`（起始 uptime 3312891 秒）
-2. `govc guest.upload` 推入 `squashfs-combined.img.gz`，**md5 校验一致**（`4fe85e69…`）
-3. 同步执行 `sysupgrade -v /tmp/upgrade.img.gz`
-4. 等待重启
-
-**升级后实测结果，全部通过：**
+### 在线更新功能
 
 | 检查项 | 结果 |
 |---|---|
-| uptime | ✅ **46 秒**（确认真正重启） |
-| shadow | ✅ 保持 9 字段 |
-| `root:password` 登录 | ✅ 成功 |
-| `root:wrongpass` 登录 | ✅ 被拒绝 |
-| dropbear 22 | ✅ LISTEN |
-| `S05fix-root-shadow` | ✅ 仍启用 |
-| rootfs | ✅ overlayfs |
+| 版本比对 | ✅ `CURRENT=v7-r8200` vs `LATEST=v6-r8194` → `uptodate` |
+| 忽略 / 恢复 | ✅ 往返正常 |
+| SHA256 不符 | ✅ `hash changed since verify; refusing to flash` |
+| 无 VERIFIED 作业时 apply | ✅ 拒绝 |
+| RPC 允许命令 | ✅ `status` 正常返回 |
+| RPC 非白名单命令 | ✅ `command not allowed` |
+| RPC 注入标签 | ✅ `invalid tag` |
+| RPC 参数个数 | ✅ `bad argument count` |
+| 空间检查 | ✅ `/overlay` 1.8 GB 可用 |
+
+### 上游同步
+
+`07cebbcf2` → `cbe28467f`（5 个提交，与本项目改动零重叠）。本地 4 项改动与 5 个自定义包全部保留，合并后五项校验通过。
 
 ---
 
-## 五、镜像文件
+## 五、镜像
 
-| 文件 | 大小 | SHA256 |
-|---|---|---|
-| `openwrt-x86-64-generic-squashfs-combined-efi.vmdk` | 185 MB | `50e89a50…8dc2` |
-| `openwrt-x86-64-generic-squashfs-combined.vmdk` | 184 MB | `db03d04d…5bb` |
-| `openwrt-x86-64-generic-squashfs-combined-efi.img.gz` | 186 MB | `6649b4c8…ad32` |
-| `openwrt-x86-64-generic-squashfs-combined.img.gz` | 186 MB | `f0171bc4…7f77` |
+| 文件 | 大小 |
+|---|---|
+| `openwrt-x86-64-generic-squashfs-combined-efi.vmdk` | 185 MB |
+| `openwrt-x86-64-generic-squashfs-combined.vmdk` | 184 MB |
+| `openwrt-x86-64-generic-squashfs-combined-efi.img.gz` | 186 MB |
+| `openwrt-x86-64-generic-squashfs-combined.img.gz` | 186 MB |
 
-完整校验值见 `RELEASE_SHA256SUMS`：
+版本标识：`r8199-cbe28467f`，baked tag `v7-r8200`，包数 574。
 
-```sh
-sha256sum -c RELEASE_SHA256SUMS
-```
+校验：`sha256sum -c RELEASE_SHA256SUMS`
 
-> `gzip -t` 会报 `decompression OK, trailing garbage ignored` 并返回 2。这是 **OpenWrt 的 usign 签名元数据**追加在 gzip 流之后，属正常结构，不影响使用。
+> `.img.gz` 的 `gzip -t` 会报 `trailing garbage ignored`（退出码 2）。那是 OpenWrt 追加的 usign 签名元数据，属正常结构。
 
 ---
 
-## 六、如何升级
-
-**你当前卡在无法登录的旧版本**，两种方式：
-
-**方式 A：全新导入（推荐）**
-
-用本版 `.vmdk` 重建虚拟机，配置手动迁移。干净磁盘不触发保留逻辑，镜像内自带的 9 字段 shadow 直接生效。
-
-**方式 B：sysupgrade**
+## 六、升级
 
 ```sh
 sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
 ```
 
-即使你当前系统的 shadow 是 8 字段或空密码，本版的开机脚本会在首次启动时将其规范化为 9 字段。
+或在本版固件内用 `系统 → 在线更新` 完成后续升级。
 
-若当前系统 SSH 已不可用，需通过 ESXi 控制台、挂载磁盘或单用户模式推入镜像。
-
----
-
-## 七、登录凭据
-
-- 用户名：`root`
-- 密码：`password`
-
-**首次登录后立即执行 `passwd` 修改。** `password` 是上游 LEDE 的公开默认值。
+登录：`root` / `password`，**首启后立即 `passwd` 修改**。
 
 ---
 
-## 八、本版相对 v5 的变更
+## 七、已知限制
 
-| 项 | v5 | v6 |
-|---|---|---|
-| shadow 字段数 | 8（缺陷） | **9** |
-| `fix-root-shadow` CANON | 8 字段（缺陷） | **9 字段** |
-| 短字段数自动修复 | 无 | **有** |
-| ESXi 实机验证 | 未做 | **已完成（新装 + 升级）** |
-| 包总数 | 572 | 572（未变） |
-| 插件集合 | — | 未变更 |
-
-本版是纯粹的登录缺陷修复，功能与插件集合与 v5 完全一致。
+- 未在 ESXi 实机完成最终回归（QEMU 已实测通过）
+- 硬件加速不可用（x86 无 NSS/HNAT/SFE）
+- 代理工具互斥：OpenClash / passwall / ssr-plus 同时只能启用一个
+- 在线更新仅支持本仓库，不提供任意源
 
 ---
 
-## 九、已知限制
+## 八、许可
 
-- **默认密码公开**：`password` 必须首启后修改
-- **代理工具互斥**：OpenClash / passwall / ssr-plus 只能同时启用一个
-- **硬件加速不可用**：x86 无 NSS / HNAT / SFE 转发引擎，仅软件 flow offloading
-- **FakeHTTP 默认关闭**：`fakehttp.main.enabled='0'`
-- **升级保留 shadow 的行为未改**：仍然保留用户密码（这是正确的），只是现在会校验字段数
-
----
-
-## 十、许可
-
-构建脚本与配置以 MIT 发布。固件内各软件包版权归原作者所有，LEDE 主源码遵循 GPL-2.0。
+构建脚本与配置以 MIT 发布。固件内各软件包版权归原作者，LEDE 主源码遵循 GPL-2.0。

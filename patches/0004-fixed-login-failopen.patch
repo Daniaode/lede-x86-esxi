@@ -1,0 +1,21 @@
+diff --git a/package/base-files/files/usr/libexec/login.sh b/package/base-files/files/usr/libexec/login.sh
+index 1fff39c6a..b5509e792 100755
+--- a/package/base-files/files/usr/libexec/login.sh
++++ b/package/base-files/files/usr/libexec/login.sh
+@@ -1,5 +1,15 @@
+ #!/bin/sh
+ 
+-[ "$(uci -q get system.@system[0].ttylogin)" = 1 ] || exec /bin/ash --login
++# Fail closed: skip authentication only when ttylogin is explicitly 0.
++#
++# The original check was `[ "$(uci -q get ...ttylogin)" = 1 ] || exec /bin/ash --login`,
++# which fails OPEN: at early boot /etc/config/system does not exist yet (it is
++# created by config_generate during the boot service), so the lookup returns
++# empty, the test fails, and the console drops straight into an unauthenticated
++# root shell.
++#
++# Defaulting to /bin/login instead means an unset value requires a password,
++# which is the safe direction for a serial/VGA console.
++[ "$(uci -q get system.@system[0].ttylogin)" = 0 ] && exec /bin/ash --login
+ 
+ exec /bin/login

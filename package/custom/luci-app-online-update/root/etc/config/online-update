@@ -1,0 +1,5 @@
+config online-update 'main'
+	option check_enabled '1'
+	option auto_check_hours '24'
+	option keep_config '1'
+	list ignored_versions

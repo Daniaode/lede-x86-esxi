@@ -1,0 +1,17 @@
+{
+	"luci-app-online-update": {
+		"description": "Grant access to the LEDE online updater",
+		"read": {
+			"ubus": {
+				"luci.online-update": [ "exec" ]
+			},
+			"uci": [ "online-update" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.online-update": [ "exec" ]
+			},
+			"uci": [ "online-update" ]
+		}
+	}
+}

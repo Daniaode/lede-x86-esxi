@@ -1,0 +1,265 @@
+#!/bin/sh
+# Online firmware update helper for LEDE x86-64 builds.
+#
+# Reads the latest release from a FIXED GitHub repository, compares it with the
+# version baked into this image at build time, then downloads + verifies and,
+# on explicit user confirmation, hands the image to sysupgrade.
+#
+# Security posture:
+#   - the repository is hardcoded; no URL is ever taken from user input
+#   - only asset names in ASSET_WHITELIST are accepted
+#   - the asset URL must be a github.com release download URL
+#   - SHA256 is verified against RELEASE_SHA256SUMS from the same release
+#   - the hash is re-verified immediately before sysupgrade
+#   - everything goes over HTTPS with curl --fail
+#
+# Nothing here installs anything unless `apply` is called explicitly.
+
+REPO="Daniaode/lede-x86-esxi"
+API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+VER_FILE="/etc/online-update-current"
+DL_DIR="/overlay/update"
+JOB="/var/run/online-update-job"
+CFG="online-update"
+MIN_FREE_KB=409600
+ASSET_WHITELIST="openwrt-x86-64-generic-squashfs-combined-efi.img.gz openwrt-x86-64-generic-squashfs-combined.img.gz"
+
+log() { logger -t online-update "$@" 2>/dev/null; }
+die() { echo "ERROR: $*"; log "ERROR: $*"; exit 1; }
+
+uci_get() { uci -q get "${CFG}.main.${1}" 2>/dev/null; }
+
+local_version() {
+	[ -s "$VER_FILE" ] && tr -d ' \n' < "$VER_FILE" || echo "unknown"
+}
+
+seq_of() { echo "$1" | sed -n 's/^v\([0-9][0-9]*\).*/\1/p'; }
+
+# return 0 when remote is strictly newer than current
+remote_is_newer() {
+	local cs ls
+	cs=$(seq_of "$1"); ls=$(seq_of "$2")
+	[ -z "$cs" ] && return 1
+	[ -z "$ls" ] && return 1
+	[ "$ls" -gt "$cs" ] 2>/dev/null
+}
+
+is_ignored() {
+	local v
+	for v in $(uci -q get "${CFG}.main.ignored_versions" 2>/dev/null); do
+		[ "$v" = "$1" ] && return 0
+	done
+	return 1
+}
+
+jfield() { printf '%s' "$1" | jsonfilter -e "$2" 2>/dev/null | head -n1; }
+
+asset_url() {
+	printf '%s' "$1" | jsonfilter -e '@.assets[*].browser_download_url' 2>/dev/null \
+		| grep -F "/$2" | head -n1
+}
+
+job_state() {
+	# $1 = STATE value; optional extra "KEY=VALUE" pairs on stdin already written
+	printf 'STATE=%s\n' "$1" > "$JOB.tmp"
+	cat >> "$JOB.tmp"
+	mv "$JOB.tmp" "$JOB"
+}
+
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+	echo "CURRENT=$(local_version)"
+	echo "CHECK_ENABLED=$(uci_get check_enabled)"
+	echo "AUTO_HOURS=$(uci_get auto_check_hours)"
+	echo "KEEP_CONFIG=$(uci_get keep_config)"
+	echo "IGNORED=$(uci -q get "${CFG}.main.ignored_versions" 2>/dev/null | tr '\n' ' ')"
+	echo "REPO=$REPO"
+}
+
+cmd_check() {
+	local json latest cur avail
+
+	json=$(curl -fsS --max-time 20 \
+		-H 'Accept: application/vnd.github+json' \
+		-H 'User-Agent: lede-online-update' "$API_URL" 2>/dev/null) || {
+		echo "RESULT=error"; echo "REASON=network"; echo "UPDATE_AVAILABLE=0"; exit 1
+	}
+
+	latest=$(jfield "$json" '@.tag_name')
+	[ -n "$latest" ] || { echo "RESULT=error"; echo "REASON=parse"; echo "UPDATE_AVAILABLE=0"; exit 1; }
+
+	cur=$(local_version)
+	echo "CURRENT=$cur"
+	echo "LATEST=$latest"
+
+	if ! remote_is_newer "$cur" "$latest"; then
+		echo "RESULT=uptodate"; echo "UPDATE_AVAILABLE=0"; return 0
+	fi
+	if is_ignored "$latest"; then
+		echo "RESULT=ignored"; echo "UPDATE_AVAILABLE=0"; return 0
+	fi
+
+	echo "RESULT=available"
+	echo "UPDATE_AVAILABLE=1"
+	echo "PUBLISHED=$(jfield "$json" '@.published_at')"
+	echo "NOTES_URL=$(jfield "$json" '@.html_url')"
+
+	avail=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')
+	echo "OVERLAY_FREE_KB=${avail:-0}"
+	[ "${avail:-0}" -ge "$MIN_FREE_KB" ] && echo "SPACE_OK=1" || echo "SPACE_OK=0"
+	return 0
+}
+
+cmd_ignore() {
+	[ -n "$1" ] || die "ignore needs a tag"
+	is_ignored "$1" && { echo "RESULT=ok"; echo "NOTE=already"; return 0; }
+	uci -q add_list "${CFG}.main.ignored_versions=$1" || die "uci write failed"
+	uci -q commit "$CFG" || die "uci commit failed"
+	log "ignore $1"
+	echo "RESULT=ok"
+}
+
+cmd_unignore() {
+	[ -n "$1" ] || die "unignore needs a tag"
+	local list cur
+	list=$(uci -q get "${CFG}.main.ignored_versions" 2>/dev/null)
+	[ -z "$list" ] && { echo "RESULT=ok"; echo "NOTE=empty"; return 0; }
+	uci -q delete "${CFG}.main.ignored_versions" >/dev/null 2>&1
+	for cur in $list; do
+		[ "$cur" = "$1" ] && continue
+		uci -q add_list "${CFG}.main.ignored_versions=$cur"
+	done
+	uci -q commit "$CFG" || die "uci commit failed"
+	log "unignore $1"
+	echo "RESULT=ok"
+}
+
+# Long-running; runs detached. Progress lands in $JOB.
+cmd_download() {
+	local json tag url img sums_url avail want got
+
+	job_state "RUNNING" < /dev/null
+
+	json=$(curl -fsS --max-time 20 \
+		-H 'Accept: application/vnd.github+json' \
+		-H 'User-Agent: lede-online-update' "$API_URL" 2>/dev/null) || {
+		printf 'MESSAGE=%s\n' "release API unreachable" | job_state "ERROR"; exit 1
+	}
+
+	tag=$(jfield "$json" '@.tag_name')
+	[ -n "$tag" ] || { printf 'MESSAGE=%s\n' "cannot parse tag" | job_state "ERROR"; exit 1; }
+
+	if ! remote_is_newer "$(local_version)" "$tag"; then
+		printf 'MESSAGE=%s\n' "no newer release" | job_state "ERROR"; exit 1
+	fi
+
+	url=""; img=""
+	for n in $ASSET_WHITELIST; do
+		url=$(asset_url "$json" "$n")
+		[ -n "$url" ] && { img="$n"; break; }
+	done
+	[ -n "$url" ] || { printf 'MESSAGE=%s\n' "no whitelisted asset" | job_state "ERROR"; exit 1; }
+
+	case "$url" in
+		https://github.com/*/releases/download/*) ;;
+		*) printf 'MESSAGE=%s\n' "asset URL rejected" | job_state "ERROR"; exit 1 ;;
+	esac
+
+	sums_url="${url%/*}/RELEASE_SHA256SUMS"
+
+	mkdir -p "$DL_DIR" || { printf 'MESSAGE=%s\n' "cannot create $DL_DIR" | job_state "ERROR"; exit 1; }
+
+	avail=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')
+	[ "${avail:-0}" -ge "$MIN_FREE_KB" ] || {
+		printf 'MESSAGE=%s\n' "insufficient space (${avail:-0} KB)" | job_state "ERROR"; exit 1
+	}
+
+	rm -f "$DL_DIR/firmware.img.gz" "$DL_DIR/SHA256SUMS"
+	log "downloading $tag/$img"
+
+	curl -fsS -L --max-time 1800 -o "$DL_DIR/firmware.img.gz" "$url" || {
+		printf 'MESSAGE=%s\n' "firmware download failed" | job_state "ERROR"; exit 1
+	}
+	curl -fsS -L --max-time 60 -o "$DL_DIR/SHA256SUMS" "$sums_url" || {
+		printf 'MESSAGE=%s\n' "checksum download failed" | job_state "ERROR"; exit 1
+	}
+
+	want=$(grep -F " $img" "$DL_DIR/SHA256SUMS" 2>/dev/null | awk '{print $1}' | head -n1)
+	[ -n "$want" ] || { printf 'MESSAGE=%s\n' "no checksum entry for $img" | job_state "ERROR"; exit 1; }
+
+	got=$(sha256sum "$DL_DIR/firmware.img.gz" 2>/dev/null | awk '{print $1}')
+	if [ "$want" != "$got" ]; then
+		rm -f "$DL_DIR/firmware.img.gz" "$DL_DIR/SHA256SUMS"
+		printf 'MESSAGE=%s\n' "SHA256 mismatch, file discarded" | job_state "ERROR"
+		log "SHA256 mismatch want=$want got=$got"
+		exit 1
+	fi
+
+	log "verified $tag/$img"
+
+	{
+		printf 'TAG=%s\n' "$tag"
+		printf 'ASSET=%s\n' "$img"
+		printf 'SHA256=%s\n' "$got"
+	} | job_state "VERIFIED"
+}
+
+# Spawns the download worker detached so the rpcd call returns immediately.
+# Progress is polled through `jobstatus`.
+cmd_start() {
+	rm -f "$JOB"
+	job_state "RUNNING" < /dev/null
+	# setsid detaches into its own session: the worker must survive this
+	# rpcd call returning, otherwise the download is killed mid-flight.
+	setsid /usr/sbin/online-update download >/dev/null 2>&1 < /dev/null &
+	echo "RESULT=started"
+	echo "STATE=RUNNING"
+}
+
+cmd_jobstatus() {
+	if [ -f "$JOB" ]; then cat "$JOB"; else echo "STATE=IDLE"; fi
+}
+
+# Only runs on a VERIFIED job, and re-checks the hash right before flashing.
+cmd_apply() {
+	local state tag asset want got keep
+
+	state=$(sed -n 's/^STATE=//p' "$JOB" 2>/dev/null | head -n1)
+	[ "$state" = "VERIFIED" ] || die "no verified download pending (state=${state:-none})"
+
+	[ -s "$DL_DIR/firmware.img.gz" ] || die "firmware file missing"
+	want=$(sed -n 's/^SHA256=//p' "$JOB" 2>/dev/null | head -n1)
+	got=$(sha256sum "$DL_DIR/firmware.img.gz" 2>/dev/null | awk '{print $1}')
+	[ -n "$want" ] && [ "$want" = "$got" ] || die "hash changed since verify; refusing to flash"
+
+	keep=$(uci_get keep_config)
+	[ -z "$keep" ] && keep=1
+
+	job_state "APPLYING" < /dev/null
+	log "sysupgrade starting (keep_config=$keep)"
+
+	if [ "$keep" = "1" ]; then
+		sysupgrade "$DL_DIR/firmware.img.gz"
+	else
+		sysupgrade -n "$DL_DIR/firmware.img.gz"
+	fi
+}
+
+cmd_cleanup() {
+	rm -f "$DL_DIR/firmware.img.gz" "$DL_DIR/SHA256SUMS" "$JOB" 2>/dev/null
+	echo "RESULT=ok"
+}
+
+case "$1" in
+	status)    cmd_status ;;
+	check)     cmd_check ;;
+	ignore)    cmd_ignore "$2" ;;
+	unignore)  cmd_unignore "$2" ;;
+	start)     cmd_start ;;
+	download)  cmd_download ;;
+	jobstatus) cmd_jobstatus ;;
+	apply)     cmd_apply ;;
+	cleanup)   cmd_cleanup ;;
+	*) echo "Usage: $0 {status|check|ignore <tag>|unignore <tag>|start|download|jobstatus|apply|cleanup}" >&2; exit 2 ;;
+esac

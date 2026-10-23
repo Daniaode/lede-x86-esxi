@@ -1,0 +1,14 @@
+{
+	"admin/system/online-update": {
+		"title": "Online Update",
+		"order": 95,
+		"action": {
+			"type": "view",
+			"path": "system/online-update"
+		},
+		"depends": {
+			"acl": [ "luci-app-online-update" ],
+			"uci": { "online-update": true }
+		}
+	}
+}

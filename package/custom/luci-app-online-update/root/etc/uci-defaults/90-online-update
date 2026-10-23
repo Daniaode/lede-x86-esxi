@@ -1,0 +1,32 @@
+#!/bin/sh
+# First-boot defaults for the online updater: stamp the baked version and
+# enable the timer. Idempotent.
+
+VER_FILE=/etc/online-update-current
+
+[ -n "$IPKG_INSTROOT" ] && exit 0
+
+# Record the version this image was built as, unless already present.
+if [ ! -s "$VER_FILE" ]; then
+	tag=""
+	[ -f /etc/openwrt_release_baked ] && . /etc/openwrt_release_baked 2>/dev/null
+	[ -n "$DISTRIB_RELEASE_TAG" ] && tag="$DISTRIB_RELEASE_TAG"
+	[ -z "$tag" ] && tag="$(sed -n "s/^DISTRIB_RELEASE_TAG='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null | head -n1)"
+	[ -z "$tag" ] && tag="unknown"
+	echo "$tag" > "$VER_FILE"
+fi
+
+uci -q get online-update.main >/dev/null 2>&1 || {
+	uci -q batch <<-EOT
+		set online-update.main=online-update
+		set online-update.main.check_enabled='1'
+		set online-update.main.auto_check_hours='24'
+		set online-update.main.keep_config='1'
+		commit online-update
+	EOT
+}
+
+/etc/init.d/online-update enable >/dev/null 2>&1
+/etc/init.d/online-update restart >/dev/null 2>&1
+
+exit 0

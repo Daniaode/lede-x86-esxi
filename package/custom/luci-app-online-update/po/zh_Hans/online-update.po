@@ -1,0 +1,137 @@
+msgid "Online Update"
+msgstr "在线更新"
+
+msgid "Checks a fixed release repository for newer firmware. Nothing is downloaded or installed without your confirmation."
+msgstr "从固定的发布仓库检查是否有新固件。未经你确认，不会下载或安装任何内容。"
+
+msgid "Current version"
+msgstr "当前版本"
+
+msgid "Latest version"
+msgstr "最新版本"
+
+msgid "Repository"
+msgstr "发布仓库"
+
+msgid "Last check"
+msgstr "上次检查"
+
+msgid "just performed"
+msgstr "刚刚执行"
+
+msgid "Actions"
+msgstr "操作"
+
+msgid "Status"
+msgstr "状态"
+
+msgid "Automatic checks"
+msgstr "自动检查"
+
+msgid "The background timer only refreshes the status. It never installs anything."
+msgstr "后台定时器只刷新状态，不会安装任何东西。"
+
+msgid "Enable automatic checks"
+msgstr "启用自动检查"
+
+msgid "Check interval (hours)"
+msgstr "检查间隔（小时）"
+
+msgid "Ignored versions"
+msgstr "已忽略的版本"
+
+msgid "None"
+msgstr "无"
+
+msgid "Restore prompt"
+msgstr "恢复提示"
+
+msgid "No newer firmware available."
+msgstr "没有更新的固件。"
+
+msgid "This version is ignored. Restore the prompt below to be notified again."
+msgstr "此版本已被忽略。可在下方恢复提示以便再次收到通知。"
+
+msgid "Check again"
+msgstr "重新检查"
+
+msgid "Not enough free space on /overlay (need 400 MB)."
+msgstr "/overlay 空间不足（需要 400 MB）。"
+
+msgid "Update online to %s"
+msgstr "在线更新到 %s"
+
+msgid "Download manually"
+msgstr "自行下载"
+
+msgid "Do not remind me"
+msgstr "不再提示"
+
+msgid "Downloading and verifying…"
+msgstr "正在下载并校验…"
+
+msgid "Download complete."
+msgstr "下载完成。"
+
+msgid "Installing, the device will reboot…"
+msgstr "正在安装，设备将重启…"
+
+msgid "Failed."
+msgstr "失败。"
+
+msgid "Release: %s"
+msgstr "版本：%s"
+
+msgid "Checking…"
+msgstr "检查中…"
+
+msgid "Contacting the release repository."
+msgstr "正在连接发布仓库。"
+
+msgid "The firmware will be downloaded to /overlay and its SHA256 verified against the release manifest. You will be asked to confirm again before it is installed."
+msgstr "固件将下载到 /overlay，并用发布清单校验 SHA256。安装前会再次请你确认。"
+
+msgid "Start download"
+msgstr "开始下载"
+
+msgid "Cancel"
+msgstr "取消"
+
+msgid "Firmware %s downloaded and verified (SHA256 OK)."
+msgstr "固件 %s 已下载并通过 SHA256 校验。"
+
+msgid "Keep configuration"
+msgstr "保留配置"
+
+msgid "Install and reboot"
+msgstr "安装并重启"
+
+msgid "Discard"
+msgstr "放弃"
+
+msgid "Installing…"
+msgstr "安装中…"
+
+msgid "Writing the image. The device will reboot; the page will disconnect."
+msgstr "正在写入镜像。设备将重启，页面会断开。"
+
+msgid "You will not be reminded about %s."
+msgstr "不再提示 %s。"
+
+msgid "Prompt restored for %s."
+msgstr "已恢复 %s 的提示。"
+
+msgid "Operation in progress, see below."
+msgstr "操作进行中，见下方状态。"
+
+msgid "New firmware available: %s"
+msgstr "有新固件可用：%s"
+
+msgid "Current version: %s"
+msgstr "当前版本：%s"
+
+msgid "Update online"
+msgstr "在线更新"
+
+msgid "Firmware update"
+msgstr "固件更新"
