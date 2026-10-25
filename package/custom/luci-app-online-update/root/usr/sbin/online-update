@@ -15,7 +15,7 @@
 #
 # Nothing here installs anything unless `apply` is called explicitly.
 
-REPO="Daniaode/lede-x86-esxi"
+REPO="Daniaode/openwrt-x86"
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 VER_FILE="/etc/online-update-current"
 DL_DIR="/overlay/update"
@@ -80,7 +80,7 @@ cmd_status() {
 cmd_check() {
 	local json latest cur avail
 
-	json=$(curl -fsS --max-time 20 \
+	json=$(curl -fsSL --max-time 20 \
 		-H 'Accept: application/vnd.github+json' \
 		-H 'User-Agent: lede-online-update' "$API_URL" 2>/dev/null) || {
 		echo "RESULT=error"; echo "REASON=network"; echo "UPDATE_AVAILABLE=0"; exit 1
@@ -141,7 +141,7 @@ cmd_download() {
 
 	job_state "RUNNING" < /dev/null
 
-	json=$(curl -fsS --max-time 20 \
+	json=$(curl -fsSL --max-time 20 \
 		-H 'Accept: application/vnd.github+json' \
 		-H 'User-Agent: lede-online-update' "$API_URL" 2>/dev/null) || {
 		printf 'MESSAGE=%s\n' "release API unreachable" | job_state "ERROR"; exit 1
