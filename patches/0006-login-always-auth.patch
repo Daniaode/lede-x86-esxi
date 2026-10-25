@@ -1,0 +1,28 @@
+diff --git a/package/base-files/files/usr/libexec/login.sh b/package/base-files/files/usr/libexec/login.sh
+index 1fff39c6a..bd37f2e5a 100755
+--- a/package/base-files/files/usr/libexec/login.sh
++++ b/package/base-files/files/usr/libexec/login.sh
+@@ -1,5 +1,22 @@
+ #!/bin/sh
+ 
+-[ "$(uci -q get system.@system[0].ttylogin)" = 1 ] || exec /bin/ash --login
++# The console always requires a password.
++#
++# History, because this file has been wrong twice:
++#
++#   v1-v5  [ "$(uci ...ttylogin)" = 1 ] || exec /bin/ash --login
++#          Fails OPEN. /etc/config/system does not exist yet at the first
++#          askfirst console, so the lookup returns empty and the test fails,
++#          dropping straight into an unauthenticated root shell.
++#
++#   v6-v8  [ "$(uci ...ttylogin)" = 0 ] && exec /bin/ash --login
++#          Fails open a different way. /etc/config/system is a conffile that
++#          sysupgrade preserves verbatim, so `ttylogin 0` written by an old
++#          image survives every later upgrade and still disables the prompt.
++#          Confirmed on ESXi: v7 -> v8 kept ttylogin=0 and the console opened
++#          without a password although the image default is 1.
++#
++# The ttylogin switch cannot be trusted to leave authentication on, so it is
++# no longer consulted. Every console gets /bin/login.
+ 
+ exec /bin/login
