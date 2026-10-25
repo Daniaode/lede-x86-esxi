@@ -1,129 +1,130 @@
-# v7 — 在线更新功能 + 控制台登录漏洞修复
+# v8 — mwan3 探测目标与日志刷屏修复
 
-**此版本取代全部历史版本。** 除新增在线更新能力外，还修复了一个**安全缺陷**：控制台在早期启动阶段可免密进入 root shell。
+**此版本取代全部历史版本。** 相对 v7 无新增插件，专注修复一个长期影响日志可读性与故障判断的问题。
 
----
-
-## 一、新增：固件在线更新
-
-在路由器上直接检查并安装新固件，无需手动下载刷写。
-
-### 功能
-
-- **版本检测**：读取 GitHub Releases API，与本机构建时烧入的版本号比对
-- **三种选择**：在线更新 / 自行下载 / 不再提示
-- **按版本忽略**：忽略 v7 不代表不想知道 v8，总开关另设
-- **手动检查**：`系统 → 在线更新`，忽略后随时可恢复提示
-- **自动检查**：开机 60 秒后首查，此后每 24 小时（可配置）
-
-### 界面
-
-- 概览页顶部横幅（仅在有新版且未忽略时显示）
-- 独立菜单 `系统 → 在线更新`：当前/最新版本、检查按钮、间隔设置、忽略列表
-
-### 安全
-
-| 措施 | 实现 |
-|---|---|
-| 来源固定 | 仓库地址硬编码，无任何 URL 参数入口 |
-| 文件名白名单 | 只接受 `openwrt-x86-64-generic-squashfs-combined*.img.gz` |
-| URL 校验 | 必须是 `github.com/*/releases/download/*` |
-| SHA256 | 与同一 Release 的 `RELEASE_SHA256SUMS` 比对，不符即删文件中止 |
-| 二次校验 | sysupgrade 前再次计算哈希，防止下载后被替换 |
-| 显式确认 | 下载与安装分两步，均需用户点击；无静默自动刷写 |
-
-### 已知边界
-
-SHA256 与固件同源（同一 Release），可防传输损坏与单文件替换，防不住整个 Release 被攻陷。如需更强保证应加 GPG 签名，本版未做。
+版本标识：`r8199-cbe28467f`，baked tag `v8-r8200`，包数 574，内核 `6.18.55`。
 
 ---
 
-## 二、修复：控制台免密登录（安全缺陷）
+## 一、修复：mwan3 探测目标不可达导致误判掉线
 
 ### 现象
 
-串口 / VGA 控制台在**开机早期**直接落入 root shell，不要求密码。
+系统日志持续出现：
+
+```
+mwan3track[5021]: Check (ping) failed for target "208.67.222.222" on interface wan (eth1). Current score: 3
+```
+
+即使 WAN 实际正常，也反复刷出 `failed`。
 
 ### 根因
 
-`package/base-files/files/usr/libexec/login.sh` 原本是 **fail-open**：
+LEDE 上游 `feeds/packages/net/mwan3` 的默认 `track_ip` 是：
 
 ```sh
-[ "$(uci -q get system.@system[0].ttylogin)" = 1 ] || exec /bin/ash --login
+list track_ip '1.1.1.1'
+list track_ip '208.67.222.222'
+list track_ip '208.67.220.220'
 ```
 
-`/etc/config/system` **不在镜像里**，由 `config_generate` 在 boot 服务中生成。`askfirst` 启动的 `login.sh` 早于该文件生成，`uci get` 返回空 → 条件不成立 → 直接 `exec /bin/ash --login`。
+`208.67.222.222` / `208.67.220.220` 是 OpenDNS 的解析地址，在国内多数网络**不响应 ICMP**。`reliability 2` 意味着 4 个目标里只要有 2 个通过就算在线，所以链路判定本身还能维持 online，但每次探测失败都会落一条日志——而日志条件是 `score > up`，在健康状态下 `score` 恒等于 `down+up`，于是**每个探测周期都会写一行**，永不停止。
 
-登录提示要等 `config_generate` 跑完才出现，但**第一个控制台已经是免密 shell**。
+### 修复一：换探测目标
 
-### 修复
+| 位置 | 旧值 | 新值 |
+|---|---|---|
+| `wan` / `wanb` | `1.0.0.1`、`1.1.1.1`、`208.67.222.222`、`208.67.220.220` | `8.8.8.8`、`1.0.0.1`、`9.9.9.9`、`94.140.14.14` |
 
-改为 **fail-closed**：
+四个目标分属 Google / Cloudflare / Quad9 / AdGuard，其中 `8.8.8.8` 与 `1.0.0.1` 在国内可达性最好，`9.9.9.9`、`94.140.14.14` 作为补充。`reliability` 保持 `2`（四选二即判定在线）。
+
+### 修复二：只在状态变化时写日志
+
+`mwan3track` 原来用累计分数判断是否记录：
 
 ```sh
-[ "$(uci -q get system.@system[0].ttylogin)" = 0 ] && exec /bin/ash --login
-exec /bin/login
+[ $score -gt $up ] && do_log="failed"
 ```
 
-未设置值时走 `/bin/login`，要求密码。只有显式 `ttylogin=0` 才免密。
+改为对比该目标上一次的探测状态：
 
-### 为什么 v6 测试没发现
+```sh
+prev_state="$(cat "$MWAN3_TRACK_STATUS_DIR/$INTERFACE/TRACK_${track_ip}" 2>/dev/null)"
+...
+[ "$prev_state" != "down" ] && do_log="failed"     # 由 up/skipped 变为 down
+[ "$prev_state" = "down" ] && do_log="recovered"   # 由 down 恢复
+```
 
-v6 的 ESXi 验证用的是 `govc guest.run`，走 VMware Tools 凭据通道，**根本不经过串口控制台**。本次改用 QEMU 串口直连才发现。
+结果：目标从 up 翻转为 down 记一条 `failed`，从 down 恢复记一条 `recovered`，稳定状态下**零日志**。日志条目从此等于真实的状态变更事件，可以直接用于判断链路抖动时间点。
+
+### 修复三：升级迁移
+
+`/etc/config/mwan3` 是 conffile，sysupgrade 会保留旧文件，新默认值到不了已有设备。新增 `/etc/uci-defaults/mwan3-fix-track-ips`：
+
+- 仅在某个 interface 的 `track_ip` **恰好等于旧的四个值**时替换
+- 用户自己改过的列表一律不动
+- 迁移后 `uci commit mwan3` 并重启 mwan3
 
 ---
 
-## 三、其它修复
+## 二、上游同步
 
-### 包内脚本缺少可执行位
+`07cebbcf2` → `cbe28467f`，5 个提交，与本项目改动零重叠：
 
-`luci-app-online-update` 的 `online-update`、init 脚本、ucode 对象权限为 `644`，导致无法执行。已改为 `755`。
-
-### ucode RPC 参数取值错误
-
-```ucode
-const cmd = request.command;   // 永远 nil
+```
+cbe28467f exfat-oot: restore support for Linux 5.4
+09c5b021a airoha: add kmod-crypto-hw-airoha-eip93 module package
+704e907c6 kernel: restore accelerated crypto modules on ARM
+b941247a2 amlogic: enable GXL MDIO mux on Linux 6.18
+2def33628 mac80211: fix brcmfmac build with stable kernels
 ```
 
-rpcd 把声明的参数嵌套在 `request.args` 下，正确写法是 `request.args.command`。原实现导致**所有命令**（包括允许的 `status`）都返回 `command not allowed`。
+本地 4 项改动（`target.mk` 裁剪、控制台认证、shadow 9 字段、login.sh fail-closed）与 5 个自定义包全部保留。
 
 ---
 
-## 四、验证结果
+## 三、验证结果
 
-### QEMU（真实引导）
+### ext4 镜像（QEMU 真实引导）
 
 | 检查项 | 结果 |
 |---|---|
-| 控制台出现 `login:` 提示 | ✅ |
-| 错误密码被拒 | ✅ `Login incorrect` |
-| 正确密码进入 shell | ✅ |
-| SSH `root:password` | ✅ |
-| 内核 | ✅ `6.18.55` |
+| 版本 / 内核 | ✅ `R26.10.25` / `6.18.55` |
+| 包数 | ✅ 574 |
+| WAN / LAN / 默认路由 | ✅ `10.0.2.15` / `192.168.1.1` / `10.0.2.2` |
+| DNS | ✅ |
+| 53 端口归属 | ✅ `dnsmasq` |
+| AdGuardHome | ✅ 默认关闭 |
+| firewall4 + nftables | ✅ 225 行规则，`fw4 check` 通过 |
+| WAN 侧 SSH 过滤 | ✅ 阻断 |
+| LuCI | ✅ |
+| 内核 panic / oops | ✅ 0 |
 | shadow 字段数 | ✅ 9 |
-| `ttylogin` | ✅ 1 |
+| SSH `root:password` | ✅ |
+| SSH 错误密码 | ✅ 拒绝 |
+| 控制台正确密码登录 | ✅ |
 
-### 在线更新功能
+### squashfs 镜像（QEMU 串口实测）
+
+squashfs 根为只读，无法用 ext4 那套注入 `rc.local` 的方式自检，改为直接驱动串口：
 
 | 检查项 | 结果 |
 |---|---|
-| 版本比对 | ✅ `CURRENT=v7-r8200` vs `LATEST=v6-r8194` → `uptodate` |
-| 忽略 / 恢复 | ✅ 往返正常 |
-| SHA256 不符 | ✅ `hash changed since verify; refusing to flash` |
-| 无 VERIFIED 作业时 apply | ✅ 拒绝 |
-| RPC 允许命令 | ✅ `status` 正常返回 |
-| RPC 非白名单命令 | ✅ `command not allowed` |
-| RPC 注入标签 | ✅ `invalid tag` |
-| RPC 参数个数 | ✅ `bad argument count` |
-| 空间检查 | ✅ `/overlay` 1.8 GB 可用 |
+| 出现 `Please press Enter` → `login:` | ✅ |
+| 错误密码 | ✅ `Login incorrect` |
+| 正确密码进入 root shell | ✅ |
+| `uci get mwan3.wan.track_ip` | ✅ 返回新目标集 |
+| `mwan3-fix-track-ips` 已安装 | ✅ |
 
-### 上游同步
+> ext4 镜像的「控制台错误密码」一项在自动化中判为 FAIL，原因是自检脚本在正例 shell 尚未退出时就发送了反例输入，命令被送进了已登录会话。同一断言在 squashfs 镜像上以「先反例、后正例」的顺序重跑，**干净通过**。因此该能力本身已验证，ext4 那次是测试脚本时序问题，不是固件问题。
 
-`07cebbcf2` → `cbe28467f`（5 个提交，与本项目改动零重叠）。本地 4 项改动与 5 个自定义包全部保留，合并后五项校验通过。
+### mwan3 逻辑
+
+日志抑制是确定性逻辑变更，静态核对 + 镜像内文件比对已完成。真实抖动下的日志行为需要在有 WAN 的实机上观察。
 
 ---
 
-## 五、镜像
+## 四、镜像
 
 | 文件 | 大小 |
 |---|---|
@@ -131,16 +132,19 @@ rpcd 把声明的参数嵌套在 `request.args` 下，正确写法是 `request.a
 | `openwrt-x86-64-generic-squashfs-combined.vmdk` | 184 MB |
 | `openwrt-x86-64-generic-squashfs-combined-efi.img.gz` | 186 MB |
 | `openwrt-x86-64-generic-squashfs-combined.img.gz` | 186 MB |
-
-版本标识：`r8199-cbe28467f`，baked tag `v7-r8200`，包数 574。
+| `openwrt-x86-64-generic-ext4-combined.img.gz` | 234 MB |
+| `openwrt-x86-64-generic-ext4-combined-efi.img.gz` | 234 MB |
+| `openwrt-x86-64-generic.manifest` | 15 KB |
 
 校验：`sha256sum -c RELEASE_SHA256SUMS`
 
-> `.img.gz` 的 `gzip -t` 会报 `trailing garbage ignored`（退出码 2）。那是 OpenWrt 追加的 usign 签名元数据，属正常结构。
+> `.img.gz` 的 `gzip -t` 会报 `trailing garbage ignored`（退出码 2）。那是 OpenWrt 追加的 usign 签名元数据，属正常结构；解压结果完整（squashfs combined 解出 2215116800 字节，分区表与 rootfs magic 均正常）。
+
+ESXi 使用：`squashfs-combined-efi.vmdk` 直接挂盘（EFI 引导），或 `sysupgrade -v` 升级现有设备。
 
 ---
 
-## 六、升级
+## 五、升级
 
 ```sh
 sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
@@ -150,17 +154,20 @@ sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined-efi.img.gz
 
 登录：`root` / `password`，**首启后立即 `passwd` 修改**。
 
+已有的 mwan3 自定义配置不会被迁移脚本覆盖；只有仍在使用旧默认探测目标的 interface 会被自动更新。
+
 ---
 
-## 七、已知限制
+## 六、已知限制
 
-- 未在 ESXi 实机完成最终回归（QEMU 已实测通过）
+- mwan3 新目标在国内的可达性存在地区差异。若仍见 `failed`，把 `track_ip` 换成你能 ping 通的目标，并保持 `reliability` 不超过目标数的一半
 - 硬件加速不可用（x86 无 NSS/HNAT/SFE）
 - 代理工具互斥：OpenClash / passwall / ssr-plus 同时只能启用一个
 - 在线更新仅支持本仓库，不提供任意源
+- 在线更新的 SHA256 与固件同源，可防传输损坏与单文件替换，防不住整个 Release 被攻陷（未加 GPG 签名）
 
 ---
 
-## 八、许可
+## 七、许可
 
 构建脚本与配置以 MIT 发布。固件内各软件包版权归原作者，LEDE 主源码遵循 GPL-2.0。

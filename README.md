@@ -2,31 +2,32 @@
 
 基于 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede) 的自用固件构建，面向 ESXi 7.0 虚拟机。
 
-- 源码提交：`07cebbcf2`
-- 版本：`r8194-07cebbcf2`
+- 源码提交：`cbe28467f`
+- 版本：`r8199-cbe28467f`
 - 内核：`6.18.55`
 - 目标：`x86/64` Generic
 - 引导：GRUB（BIOS + EFI 双支持）
 - 根分区：2048 MiB
 - 防火墙后端：firewall4 + nftables
-- 包总数：572
+- 包总数：574
 - 镜像压缩：gzip（`.img.gz`）
 - AdGuardHome：默认关闭（`enabled=0`），dnsmasq 独占 53
 - 控制台登录：需账号密码（默认 `root` / `password`，**请首启后立即修改**）
 - 升级安全：`etc/init.d/fix-root-shadow` 开机自检，空密码 / 短字段数自动修复
 
-各版本变更见 [Releases](../../releases)。最新为 **v7**：新增固件在线更新（LuCI 横幅 + 独立页面 + SHA256 校验），修复控制台早期免密登录漏洞（login.sh 由 fail-open 改为 fail-closed）。
+各版本变更见 [Releases](../../releases)。最新为 **v8**：修复 mwan3 探测目标不可达导致的误判掉线与日志刷屏——默认 `track_ip` 换成国际可达目标，`mwan3track` 改为仅在状态翻转时记录日志，并对旧配置提供一次性迁移。
 
 ## 仓库内容
 
 | 路径 | 说明 |
 |---|---|
 | `seed.config` | 构建使用的完整 `.config`（可直接 `cp` 后 `make defconfig -j$(nproc)`） |
-| `RELEASE_NOTES.md` | 当前版本（v6）完整变更说明与验证记录 |
+| `RELEASE_NOTES.md` | 当前版本（v8）完整变更说明与验证记录 |
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
 | `patches/0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
 | `patches/0003-fix-root-shadow.patch` | 开机自检：修复空密码与 <9 字段的 shadow 条目 |
 | `patches/0004-fixed-login-failopen.patch` | login.sh 改为 fail-closed，修复控制台早期免密登录 |
+| `patches/0005-mwan3-track-ips.patch` | mwan3 探测目标替换 + 仅在状态翻转时记录日志 + 旧配置迁移 |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
 | `manifest/` | 最终固件的软件包清单，可用于核对 |
 | `scripts/build.sh` | 完整构建脚本（下载 + 编译，失败自动 `-j1 V=s` 重试） |
