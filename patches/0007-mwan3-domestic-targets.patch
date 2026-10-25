@@ -1,0 +1,187 @@
+diff --git a/net/mwan3/Makefile b/net/mwan3/Makefile
+index 2664a3a..ce3ba4a 100644
+--- a/net/mwan3/Makefile
++++ b/net/mwan3/Makefile
+@@ -113,6 +113,8 @@ define Package/mwan3/install
+ 	$(INSTALL_DIR) $(1)/etc/uci-defaults
+ 	$(INSTALL_DATA) ./files/etc/uci-defaults/mwan3-migrate-flush_conntrack \
+ 		$(1)/etc/uci-defaults/
++	$(INSTALL_BIN) ./files/etc/uci-defaults/mwan3-fix-track-ips \
++		$(1)/etc/uci-defaults/
+ endef
+ 
+ $(eval $(call BuildPackage,mwan3))
+diff --git a/net/mwan3/files/etc/config/mwan3 b/net/mwan3/files/etc/config/mwan3
+index 5302d80..1197193 100644
+--- a/net/mwan3/files/etc/config/mwan3
++++ b/net/mwan3/files/etc/config/mwan3
+@@ -6,10 +6,10 @@ config globals 'globals'
+ 
+ config interface 'wan'
+ 	option enabled '1'
+-	list track_ip '1.0.0.1'
+-	list track_ip '1.1.1.1'
+-	list track_ip '208.67.222.222'
+-	list track_ip '208.67.220.220'
++	list track_ip '223.5.5.5'
++	list track_ip '119.29.29.29'
++	list track_ip '180.76.76.76'
++	list track_ip '1.2.4.8'
+ 	option family 'ipv4'
+ 	option reliability '2'
+ 
+@@ -24,10 +24,10 @@ config interface 'wan6'
+ 
+ config interface 'wanb'
+ 	option enabled '0'
+-	list track_ip '1.0.0.1'
+-	list track_ip '1.1.1.1'
+-	list track_ip '208.67.222.222'
+-	list track_ip '208.67.220.220'
++	list track_ip '223.5.5.5'
++	list track_ip '119.29.29.29'
++	list track_ip '180.76.76.76'
++	list track_ip '1.2.4.8'
+ 	option family 'ipv4'
+ 	option reliability '1'
+ 
+diff --git a/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips b/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips
+new file mode 100755
+index 0000000..977f908
+--- /dev/null
++++ b/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips
+@@ -0,0 +1,81 @@
++#!/bin/sh
++# Normalise mwan3 tracking on upgrade.
++#
++# /etc/config/mwan3 is a conffile: sysupgrade preserves it, so a new default
++# never reaches an existing install. This migrates the known-bad shapes once
++# and then leaves the file alone.
++#
++# Three problems are handled.
++#
++# 1. Unreachable targets. The stock list is 1.0.0.1 / 1.1.1.1 / 208.67.x.x,
++#    and the OpenDNS resolvers do not answer ICMP on many Chinese networks,
++#    so mwan3track reported the link as flapping while it was fine.
++#
++# 2. Foreign targets that flap. A later build used 8.8.8.8 / 1.0.0.1 /
++#    9.9.9.9 / 94.140.14.14. Those answer ICMP here, but a single lossy hop
++#    still produces failed/recovered pairs on a healthy link. Domestic
++#    resolvers are simply more stable from a Chinese WAN.
++#
++# 3. reliability > target count. This is the fatal one and it is silent:
++#    mwan3 needs `reliability` targets up before the interface counts as
++#    online, so a one-target list with reliability 2 keeps the interface
++#    permanently offline even though every probe succeeds. Seen in the wild
++#    after a user narrowed track_ip by hand and left reliability at 2.
++#
++# Anything the user customised beyond these exact shapes is left untouched.
++
++[ -f /etc/config/mwan3 ] || exit 0
++
++NEW="223.5.5.5 119.29.29.29 180.76.76.76 1.2.4.8"
++
++changed=0
++
++replace_list() {
++	local section="$1"
++	uci -q delete "mwan3.$section.track_ip"
++	for ip in $NEW; do
++		uci -q add_list "mwan3.$section.track_ip=$ip"
++	done
++	logger -t mwan3-migrate "replaced track_ip on $section with domestic targets"
++	changed=1
++}
++
++for section in $(uci -q show mwan3 | sed -n "s/^mwan3\.\([^.=]*\)=interface$/\1/p"); do
++	family=$(uci -q get "mwan3.$section.family")
++	[ "$family" = "ipv4" ] || continue
++
++	cur=$(uci -q get "mwan3.$section.track_ip")
++	[ -n "$cur" ] || continue
++
++	# normalise whitespace for comparison
++	norm=$(echo "$cur" | tr -s " " | sed "s/^ //;s/ $//")
++	n=$(echo "$norm" | wc -w)
++
++	case "$norm" in
++		# stock upstream list
++		"1.0.0.1 1.1.1.1 208.67.222.222 208.67.220.220")
++			replace_list "$section"
++			continue
++			;;
++		# foreign list shipped by v8/v9
++		"8.8.8.8 1.0.0.1 9.9.9.9 94.140.14.14")
++			replace_list "$section"
++			continue
++			;;
++	esac
++
++	# A short list with an unreachable reliability is dead even if the user
++	# picked the targets deliberately, so widen it rather than trust them.
++	rel=$(uci -q get "mwan3.$section.reliability")
++	if [ -n "$rel" ] && [ "$n" -lt "$rel" ]; then
++		replace_list "$section"
++		continue
++	fi
++done
++
++[ "$changed" -eq 1 ] && {
++	uci -q commit mwan3
++	/etc/init.d/mwan3 restart >/dev/null 2>&1
++}
++
++exit 0
+diff --git a/net/mwan3/files/usr/sbin/mwan3track b/net/mwan3/files/usr/sbin/mwan3track
+index 81367c8..9512127 100755
+--- a/net/mwan3/files/usr/sbin/mwan3track
++++ b/net/mwan3/files/usr/sbin/mwan3track
+@@ -225,7 +225,7 @@ main() {
+ 	local keep_failure_interval check_quality failure_latency
+ 	local recovery_latency failure_loss recovery_loss
+ 
+-	local max_ttl httping_ssl track_ips do_log
++	local max_ttl httping_ssl track_ips do_log prev_state
+ 
+ 	INTERFACE=$1
+ 	STATUS=""
+@@ -358,17 +358,22 @@ main() {
+ 					;;
+ 				esac
+ 				do_log=""
++				# Log only when a target actually changes state. The original
++				# test (score > up) stays true forever while the interface is
++				# healthy -- score is pinned at down+up -- so every failed probe
++				# wrote a line on every interval, forever.
++				prev_state="$(cat "$MWAN3TRACK_STATUS_DIR/$INTERFACE/TRACK_${track_ip}" 2>/dev/null)"
+ 				if [ $check_quality -eq 0 ]; then
+ 					if [ $result -eq 0 ]; then
+ 						let host_up_count++
+ 						update_status "$track_ip" "up"
+ 
+-						[ $score -le $up ] && do_log="success"
++						[ "$prev_state" = "down" ] && do_log="recovered"
+ 					else
+ 						let lost++
+ 						update_status "$track_ip" "down"
+ 
+-						[ $score -gt $up ] && do_log="failed"
++						[ "$prev_state" != "down" ] && do_log="failed"
+ 					fi
+ 					[ -n "$do_log" ] && LOG info "Check ($track_method) ${do_log} for target \"$track_ip\" on interface $INTERFACE ($DEVICE). Current score: $score"
+ 
+@@ -377,12 +382,12 @@ main() {
+ 						let lost++
+ 						update_status "$track_ip" "down" $latency $loss
+ 
+-						[ $score -gt $up ] && do_log="failed"
++						[ "$prev_state" != "down" ] && do_log="failed"
+ 					elif [ "$loss" -le "$recovery_loss" ] && [ "$latency" -le "$recovery_latency" ]; then
+ 						let host_up_count++
+ 						update_status "$track_ip" "up" $latency $loss
+ 
+-						[ $score -le $up ] && do_log="success"
++						[ "$prev_state" = "down" ] && do_log="recovered"
+ 					else
+ 						echo "skipped" > $MWAN3TRACK_STATUS_DIR/$INTERFACE/TRACK_${track_ip}
+ 					fi

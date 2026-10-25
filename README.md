@@ -15,20 +15,21 @@
 - 控制台登录：需账号密码（默认 `root` / `password`，**请首启后立即修改**）
 - 升级安全：`etc/init.d/fix-root-shadow` 开机自检，空密码 / 短字段数自动修复
 
-各版本变更见 [Releases](../../releases)。最新为 **v9**：修复升级后控制台免密——`/etc/config/system` 是 conffile，旧固件的 `ttylogin=0` 会跨越 sysupgrade 保留并禁用登录提示。`login.sh` 现已不再读取该开关，无条件执行 `/bin/login`。已含 v8 的 mwan3 探测目标与日志刷屏修复。
+各版本变更见 [Releases](../../releases)。最新为 **v10**：mwan3 探测目标改为国内节点（阿里/腾讯/百度/CNNIC），修复单目标 + `reliability=2` 导致接口永久 offline 的隐患，迁移脚本会把目标数不足的配置补全。已含 v9 的控制台认证强制与 v8 的日志抑制。
 
 ## 仓库内容
 
 | 路径 | 说明 |
 |---|---|
 | `seed.config` | 构建使用的完整 `.config`（可直接 `cp` 后 `make defconfig -j$(nproc)`） |
-| `RELEASE_NOTES.md` | 当前版本（v9）完整变更说明与验证记录 |
+| `RELEASE_NOTES.md` | 当前版本（v10）完整变更说明与验证记录 |
 | `patches/0001-target-packages.patch` | 对 `include/target.mk` 的改动（裁剪默认包） |
 | `patches/0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
 | `patches/0003-fix-root-shadow.patch` | 开机自检：修复空密码与 <9 字段的 shadow 条目 |
 | `patches/0004-fixed-login-failopen.patch` | login.sh 改为 fail-closed，修复控制台早期免密登录 |
 | `patches/0005-mwan3-track-ips.patch` | mwan3 探测目标替换 + 仅在状态翻转时记录日志 + 旧配置迁移 |
 | `patches/0006-login-always-auth.patch` | login.sh 不再读取 `ttylogin`，控制台无条件要求密码 |
+| `patches/0007-mwan3-domestic-targets.patch` | mwan3 国内探测目标 + `reliability` 超过目标数时的自动补全 |
 | `package/custom/` | 默认 feeds 之外所需的第三方插件源码 |
 | `manifest/` | 最终固件的软件包清单，可用于核对 |
 | `scripts/build.sh` | 完整构建脚本（下载 + 编译，失败自动 `-j1 V=s` 重试） |
