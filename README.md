@@ -5,7 +5,7 @@
 
 基于 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede)，内核 **6.18.55**。
 
-各版本变更见 [Releases](../../releases)。最新为 **v12**：修复 PPPoE 下 IPv6 完全不可用——mwan3 的 `wan6` 默认启用、PPPoE 下自动绑定 `@wan`、探测目标改国内地址，并补齐升级后缺失的 LAN 侧 `RA`/`DHCPv6`/`ip6assign`。
+各版本变更见 [Releases](../../releases)。最新为 **v13**：IPv6 修复重构为源码级——`config_generate` 接口派生修复、`odhcpd.defaults` LAN 下发确保、`mwan3` IPv6 接管门控，删除所有运行时兜底脚本；并同步上游（内核 6.18.58）。
 
 ---
 
@@ -187,10 +187,9 @@
 | `0002-console-login-auth.patch` | 启用控制台登录认证（`ttylogin=1` + root 密码哈希） |
 | `0003-fix-root-shadow.patch` | 开机自检：修复空密码与字段数不足的 shadow 条目 |
 | `0004-fixed-login-failopen.patch` | `login.sh` 由 fail-open 改 fail-closed（早期启动路径） |
-| `0005-mwan3-track-ips.patch` | mwan3 探测目标替换 + 仅在状态翻转时记录日志 |
 | `0006-login-always-auth.patch` | `login.sh` 不再读取 `ttylogin`，控制台无条件要求密码 |
-| `0007-mwan3-domestic-targets.patch` | mwan3 国内探测目标 + `reliability` 超过目标数时自动补全 |
-| `0008-ipv6-pppoe-lan.patch` | PPPoE 下 IPv6：启用 mwan3 wan6、绑定 `@wan`、国内 IPv6 探测目标、补齐 LAN 侧 RA/DHCPv6/ip6assign |
+| `0009-source-ipv6-fix.patch` | 源码级 IPv6 修复：`config_generate` 接口派生修复 + `odhcpd.defaults` LAN 下发确保 |
+| `0010-mwan3-v6-gate.patch` | mwan3 全部改动（国内探测目标、日志抑制、IPv6 接管门控） |
 
 ---
 
@@ -228,9 +227,9 @@ git apply patches/0002-console-login-auth.patch
 git apply patches/0003-fix-root-shadow.patch
 git apply patches/0004-fixed-login-failopen.patch
 git apply patches/0006-login-always-auth.patch
+git apply patches/0009-source-ipv6-fix.patch
 # mwan3 补丁针对 feeds/packages，先 ./scripts/feeds update -a 再应用
-git -C feeds/packages apply ../../patches/0005-mwan3-track-ips.patch
-git -C feeds/packages apply ../../patches/0007-mwan3-domestic-targets.patch
+git -C feeds/packages apply ../../patches/0010-mwan3-v6-gate.patch
 
 ./scripts/feeds update -a && ./scripts/feeds install -a
 cp seed.config .config && make defconfig

@@ -12,10 +12,10 @@ index 2664a3a..ce3ba4a 100644
  
  $(eval $(call BuildPackage,mwan3))
 diff --git a/net/mwan3/files/etc/config/mwan3 b/net/mwan3/files/etc/config/mwan3
-index 5302d80..1197193 100644
+index 5302d80..9f6cca5 100644
 --- a/net/mwan3/files/etc/config/mwan3
 +++ b/net/mwan3/files/etc/config/mwan3
-@@ -6,10 +6,10 @@ config globals 'globals'
+@@ -6,37 +6,35 @@ config globals 'globals'
  
  config interface 'wan'
  	option enabled '1'
@@ -30,7 +30,17 @@ index 5302d80..1197193 100644
  	option family 'ipv4'
  	option reliability '2'
  
-@@ -24,10 +24,10 @@ config interface 'wan6'
+ config interface 'wan6'
+ 	option enabled '0'
+-	list track_ip '2606:4700:4700::1001'
+-	list track_ip '2606:4700:4700::1111'
+-	list track_ip '2620:0:ccd::2'
+-	list track_ip '2620:0:ccc::2'
++	list track_ip '2400:3200::1'
++	list track_ip '2400:3200:baba::1'
++	list track_ip '240c::6666'
+ 	option family 'ipv6'
+ 	option reliability '2'
  
  config interface 'wanb'
  	option enabled '0'
@@ -45,12 +55,24 @@ index 5302d80..1197193 100644
  	option family 'ipv4'
  	option reliability '1'
  
+ config interface 'wanb6'
+ 	option enabled '0'
+-	list track_ip '2606:4700:4700::1001'
+-	list track_ip '2606:4700:4700::1111'
+-	list track_ip '2620:0:ccd::2'
+-	list track_ip '2620:0:ccc::2'
++	list track_ip '2400:3200::1'
++	list track_ip '2400:3200:baba::1'
++	list track_ip '240c::6666'
+ 	option family 'ipv6'
+ 	option reliability '1'
+ 
 diff --git a/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips b/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips
 new file mode 100755
-index 0000000..977f908
+index 0000000..b4af782
 --- /dev/null
 +++ b/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,104 @@
 +#!/bin/sh
 +# Normalise mwan3 tracking on upgrade.
 +#
@@ -75,11 +97,18 @@ index 0000000..977f908
 +#    permanently offline even though every probe succeeds. Seen in the wild
 +#    after a user narrowed track_ip by hand and left reliability at 2.
 +#
++# 4. Foreign IPv6 targets. The shipped IPv6 list was Cloudflare/Facebook
++#    (2606:4700:4700::*, 2620:0:ccd::*, 2620:0:ccc::*). Those do not answer from
++#    a Chinese WAN, so an enabled wan6 stays down and the IPv6 policy resolves
++#    ::/0 to unreachable again.
++#
 +# Anything the user customised beyond these exact shapes is left untouched.
 +
 +[ -f /etc/config/mwan3 ] || exit 0
 +
 +NEW="223.5.5.5 119.29.29.29 180.76.76.76 1.2.4.8"
++NEW6="2400:3200::1 2400:3200:baba::1 240c::6666"
++OLD6="2606:4700:4700::1001 2606:4700:4700::1111 2620:0:ccd::2 2620:0:ccc::2"
 +
 +changed=0
 +
@@ -95,6 +124,22 @@ index 0000000..977f908
 +
 +for section in $(uci -q show mwan3 | sed -n "s/^mwan3\.\([^.=]*\)=interface$/\1/p"); do
 +	family=$(uci -q get "mwan3.$section.family")
++
++	# IPv6 sections carry their own list; treat everything else as IPv4.
++	if [ "$family" = "ipv6" ]; then
++		cur6=$(uci -q get "mwan3.$section.track_ip")
++		[ -n "$cur6" ] || continue
++		norm6=$(echo "$cur6" | tr -s " " | sed "s/^ //;s/ $//")
++		[ "$norm6" = "$OLD6" ] || continue
++		uci -q delete "mwan3.$section.track_ip"
++		for ip in $NEW6; do
++			uci -q add_list "mwan3.$section.track_ip=$ip"
++		done
++		logger -t mwan3-migrate "replaced IPv6 track targets on $section"
++		changed=1
++		continue
++	fi
++
 +	[ "$family" = "ipv4" ] || continue
 +
 +	cur=$(uci -q get "mwan3.$section.track_ip")
@@ -132,6 +177,45 @@ index 0000000..977f908
 +}
 +
 +exit 0
+diff --git a/net/mwan3/files/lib/mwan3/common.sh b/net/mwan3/files/lib/mwan3/common.sh
+index df42a0a..3fb5e76 100644
+--- a/net/mwan3/files/lib/mwan3/common.sh
++++ b/net/mwan3/files/lib/mwan3/common.sh
+@@ -22,6 +22,34 @@ MAX_SLEEP=$(((1<<31)-1))
+ command -v ip6tables > /dev/null
+ NO_IPV6=$?
+ 
++# Do not hijack IPv6 that is not ours to manage.
++#
++# The policy chains mark every unmarked ::/0 packet MMX_UNREACHABLE, and a
++# matching `ip -6 rule ... unreachable` drops it in the routing layer before any
++# firewall decision. That behaviour is right only while an IPv6 interface is
++# actually managed here.
++#
++# /etc/config/mwan3 is a conffile, so an upgraded install keeps the shipped
++# `wan6` at `enabled 0`. mwan3 then owns no IPv6 interface yet still blackholes
++# all of it: the router holds a valid upstream prefix and cannot reach a single
++# address. The same happens on a fresh install if the operator leaves wan6 off.
++#
++# Treat "no enabled IPv6 interface" exactly like "no ip6tables": skip every IPv6
++# rule and let the kernel route IPv6 normally. Enabling wan6 later restarts the
++# daemon, which re-evaluates this.
++if [ "$NO_IPV6" -eq 0 ]; then
++	mwan3_has_v6_iface() {
++		local s
++		for s in $(uci -q show mwan3 2>/dev/null |
++				sed -n "s/^mwan3\.\([^.=]*\)=interface$/\1/p"); do
++			[ "$(uci -q get "mwan3.$s.family")" = "ipv6" ] || continue
++			[ "$(uci -q get "mwan3.$s.enabled")" = "1" ] && return 0
++		done
++		return 1
++	}
++	mwan3_has_v6_iface || NO_IPV6=1
++fi
++
+ IPS="ipset"
+ IPT4="iptables -t mangle -w"
+ IPT6="ip6tables -t mangle -w"
 diff --git a/net/mwan3/files/usr/sbin/mwan3track b/net/mwan3/files/usr/sbin/mwan3track
 index 81367c8..9512127 100755
 --- a/net/mwan3/files/usr/sbin/mwan3track

@@ -1,0 +1,137 @@
+diff --git a/package/base-files/files/bin/config_generate b/package/base-files/files/bin/config_generate
+index c5e0a7b..70035ca 100755
+--- a/package/base-files/files/bin/config_generate
++++ b/package/base-files/files/bin/config_generate
+@@ -5,6 +5,40 @@ CFG=/etc/board.json
+ . /usr/share/libubox/jshn.sh
+ 
+ [ -s $CFG ] || /bin/board_detect || exit 1
++
++repair_pppoe_v6_sibling() {
++	local x dev6
++
++	for x in $(uci -q show network 2>/dev/null | sed -n "s/^network\.\([^.=]*\)=interface$/\1/p"); do
++		[ "$(uci -q get "network.$x.proto")" = "pppoe" ] || continue
++		uci -q get "network.${x}6" >/dev/null 2>&1 || continue
++
++		dev6=$(uci -q get "network.${x}6.device")
++		if [ "$dev6" != "@$x" ]; then
++			uci -q set "network.${x}6.device=@$x"
++			uci -q set "network.${x}6.proto=dhcpv6"
++			logger -t config_generate "rebound ${x}6 from ${dev6:-unset} to @$x (pppoe)"
++		fi
++
++		if [ -z "$(uci -q get "network.$x.ipv6")" ]; then
++			uci -q set "network.$x.ipv6=1"
++			logger -t config_generate "set $x.ipv6=1 (no dynamic ${x}_6)"
++		fi
++	done
++}
++
++repair_lan_ip6assign() {
++	[ -e /proc/sys/net/ipv6 ] || return 0
++	[ "$(uci -q get network.lan.proto)" = "static" ] || return 0
++	[ -n "$(uci -q get network.lan.ip6assign)" ] && return 0
++
++	uci -q set network.lan.ip6assign=60
++	logger -t config_generate "set network.lan.ip6assign=60"
++}
++
++repair_pppoe_v6_sibling
++repair_lan_ip6assign
++uci commit
+ [ -s /etc/config/network -a -s /etc/config/system ] && exit 0
+ 
+ generate_bridge() {
+@@ -506,6 +540,25 @@ generate_gpioswitch() {
+ 	json_select ..
+ }
+ 
++# Repair interface derivation that a later proto change invalidated.
++#
++# The generation branch below writes network.<x>6.device from the proto in use
++# at the time, and only runs when /etc/config/network does not exist. Switching
++# an existing interface to pppoe afterwards therefore leaves the v6 sibling
++# bound to the bare NIC. No PPP session lives there, so DHCPv6 never starts,
++# mwan3 can never track the link, and its IPv6 policy resolves to unreachable.
++#
++# pppd also wants to build its own dynamic <x>_6 when the ipv6 option is unset;
++# two DHCPv6 clients on one link fight over the delegated prefix. Setting
++# ipv6=1 keeps IPV6CP (link-local negotiation) and leaves prefix delegation to
++# the static sibling.
++#
++# Runs on every boot, idempotent, and only touches the pppoe mismatch.
++
++# LAN prefix delegation size comes from the generation branch, which does not
++# re-run on an existing config. Without it lan never derives an address from the
++# delegated prefix, so a router can hold a prefix and still advertise nothing.
++
+ json_init
+ json_load "$(cat ${CFG})"
+ 
+@@ -545,4 +598,5 @@ if [ ! -s /etc/config/system ]; then
+ 	json_get_keys keys led
+ 	for key in $keys; do generate_led $key; done
+ fi
++
+ uci commit
+diff --git a/package/network/services/odhcpd/files/odhcpd.defaults b/package/network/services/odhcpd/files/odhcpd.defaults
+index 3e01ba2..8eb1430 100644
+--- a/package/network/services/odhcpd/files/odhcpd.defaults
++++ b/package/network/services/odhcpd/files/odhcpd.defaults
+@@ -2,6 +2,31 @@
+ 
+ . /usr/share/libubox/jshn.sh
+ 
++# LAN IPv6 serving must exist on both paths. This used to be written inline in
++# the first-install branch only, so an upgraded router kept an existing
++# dhcp.odhcpd section, took the migration branch, exited early, and never got
++# these keys -- leaving a router that held a public prefix but advertised
++# nothing to the LAN. Fill only absent keys so an operator's choice survives.
++ensure_lan_ipv6_serving() {
++	local V6MODE="$1"
++
++	uci -q get dhcp.lan >/dev/null 2>&1 || return 0
++	[ -n "$V6MODE" ] || return 0
++
++	added=0
++	[ -n "$(uci -q get dhcp.lan.dhcpv6)" ] || { uci -q set dhcp.lan.dhcpv6="$V6MODE"; added=1; }
++	[ -n "$(uci -q get dhcp.lan.ra)" ]     || { uci -q set dhcp.lan.ra="$V6MODE"; added=1; }
++	[ -n "$(uci -q get dhcp.lan.ra_slaac)" ] || { uci -q set dhcp.lan.ra_slaac=1; added=1; }
++
++	if [ "$added" -eq 1 ]; then
++		uci -q get dhcp.lan.ra_flags | grep -q managed-config || \
++			uci -q add_list dhcp.lan.ra_flags=managed-config
++		uci -q get dhcp.lan.ra_flags | grep -q other-config || \
++			uci -q add_list dhcp.lan.ra_flags=other-config
++		uci -q commit dhcp
++	fi
++}
++
+ pio_file_check() {
+ 	local file valid
+ 
+@@ -84,6 +109,10 @@ if [ -n "$(uci -q get dhcp.odhcpd)" ]; then
+ 
+ 	[ "$commit" -eq 1 ] && uci commit dhcp
+ 
++	# Upgraded systems land here. LAN IPv6 serving has to be ensured too,
++	# otherwise the router keeps a public prefix but never advertises it.
++	ensure_lan_ipv6_serving "$([ -e /proc/sys/net/ipv6 ] && echo server)"
++
+ 	exit 0
+ fi
+ 
+@@ -130,10 +159,7 @@ set dhcp.odhcpd.loglevel=4
+ set dhcp.odhcpd.piodir=/tmp/odhcpd-piodir
+ set dhcp.odhcpd.hostsdir=/tmp/hosts
+ set dhcp.lan.dhcpv4=$V4MODE
+-set dhcp.lan.dhcpv6=$V6MODE
+-set dhcp.lan.ra=$V6MODE
+-set dhcp.lan.ra_slaac=1
+-add_list dhcp.lan.ra_flags=managed-config
+-add_list dhcp.lan.ra_flags=other-config
+ commit dhcp
+ EOF
++
++ensure_lan_ipv6_serving "$V6MODE"
