@@ -1,0 +1,414 @@
+diff --git a/net/mwan3/Makefile b/net/mwan3/Makefile
+index 2664a3a..367d0f4 100644
+--- a/net/mwan3/Makefile
++++ b/net/mwan3/Makefile
+@@ -113,6 +113,20 @@ define Package/mwan3/install
+ 	$(INSTALL_DIR) $(1)/etc/uci-defaults
+ 	$(INSTALL_DATA) ./files/etc/uci-defaults/mwan3-migrate-flush_conntrack \
+ 		$(1)/etc/uci-defaults/
++	$(INSTALL_BIN) ./files/etc/uci-defaults/mwan3-fix-track-ips \
++		$(1)/etc/uci-defaults/
++	$(INSTALL_BIN) ./files/etc/uci-defaults/mwan3-fix-ipv6 \
++		$(1)/etc/uci-defaults/
++
++	$(INSTALL_DIR) $(1)/etc/init.d
++	$(INSTALL_BIN) ./files/etc/init.d/fix-ipv6 \
++		$(1)/etc/init.d/
++
++# Install the boot symlink directly instead of via postinst: postinst only runs
++# on opkg install, and image builds extract the ipk, so a postinst-created link
++# would be missing from the firmware until the package is reinstalled.
++	$(INSTALL_DIR) $(1)/etc/rc.d
++	ln -sf ../init.d/fix-ipv6 $(1)/etc/rc.d/S18fix-ipv6
+ endef
+ 
+ $(eval $(call BuildPackage,mwan3))
+diff --git a/net/mwan3/files/etc/config/mwan3 b/net/mwan3/files/etc/config/mwan3
+index 5302d80..49e2976 100644
+--- a/net/mwan3/files/etc/config/mwan3
++++ b/net/mwan3/files/etc/config/mwan3
+@@ -6,37 +6,35 @@ config globals 'globals'
+ 
+ config interface 'wan'
+ 	option enabled '1'
+-	list track_ip '1.0.0.1'
+-	list track_ip '1.1.1.1'
+-	list track_ip '208.67.222.222'
+-	list track_ip '208.67.220.220'
++	list track_ip '223.5.5.5'
++	list track_ip '119.29.29.29'
++	list track_ip '180.76.76.76'
++	list track_ip '1.2.4.8'
+ 	option family 'ipv4'
+ 	option reliability '2'
+ 
+ config interface 'wan6'
+-	option enabled '0'
+-	list track_ip '2606:4700:4700::1001'
+-	list track_ip '2606:4700:4700::1111'
+-	list track_ip '2620:0:ccd::2'
+-	list track_ip '2620:0:ccc::2'
++	option enabled '1'
++	list track_ip '2400:3200::1'
++	list track_ip '2400:3200:baba::1'
++	list track_ip '240c::6666'
+ 	option family 'ipv6'
+ 	option reliability '2'
+ 
+ config interface 'wanb'
+ 	option enabled '0'
+-	list track_ip '1.0.0.1'
+-	list track_ip '1.1.1.1'
+-	list track_ip '208.67.222.222'
+-	list track_ip '208.67.220.220'
++	list track_ip '223.5.5.5'
++	list track_ip '119.29.29.29'
++	list track_ip '180.76.76.76'
++	list track_ip '1.2.4.8'
+ 	option family 'ipv4'
+ 	option reliability '1'
+ 
+ config interface 'wanb6'
+ 	option enabled '0'
+-	list track_ip '2606:4700:4700::1001'
+-	list track_ip '2606:4700:4700::1111'
+-	list track_ip '2620:0:ccd::2'
+-	list track_ip '2620:0:ccc::2'
++	list track_ip '2400:3200::1'
++	list track_ip '2400:3200:baba::1'
++	list track_ip '240c::6666'
+ 	option family 'ipv6'
+ 	option reliability '1'
+ 
+diff --git a/net/mwan3/files/etc/init.d/fix-ipv6 b/net/mwan3/files/etc/init.d/fix-ipv6
+new file mode 100755
+index 0000000..5d1f7b4
+--- /dev/null
++++ b/net/mwan3/files/etc/init.d/fix-ipv6
+@@ -0,0 +1,80 @@
++#!/bin/sh /etc/rc.common
++# Keep IPv6 working end to end, on both the WAN and the LAN side.
++#
++# Two independent gaps make IPv6 unusable, and neither is fixed by a fresh
++# default value because both live in files sysupgrade preserves:
++#
++# A. WAN side, PPPoE. config_generate writes network.wan6.device from whatever
++#    wan used when the config was generated. Images ship wan as dhcp, so wan6
++#    is bound to the bare NIC (eth1). Switching wan to pppoe afterwards -- the
++#    normal path -- leaves wan6 on a device that carries no PPP session, so
++#    DHCPv6 never starts, mwan3's wan6 stays down, and the balanced policy
++#    resolves every ::/0 packet to `unreachable`.
++#
++# B. LAN side, every upgrade. /etc/uci-defaults/15_odhcpd (odhcpd.defaults)
++#    sets dhcp.lan.ra, dhcp.lan.dhcpv6 and dhcp.lan.ra_slaac only in the branch
++#    that runs when dhcp.odhcpd does not exist yet; when it does exist the
++#    script takes its migration branch and exits at line 87 without ever
++#    reaching those setters. network.lan.ip6assign comes from config_generate,
++#    which also does not re-run. So an upgraded router has a working WAN IPv6
++#    (once A is fixed) but advertises nothing to the LAN: clients never get a
++#    global address, which is exactly what "IPv6 does not work" looks like.
++#
++# Only absent keys are filled in. Anything the operator set -- including an
++# explicit 'disabled' -- is left untouched. Runs at S18, before network (S20).
++START=18
++
++fix_wan6() {
++	[ "$(uci -q get network.wan.proto)" = "pppoe" ] || return 0
++	uci -q get network.wan6 >/dev/null 2>&1 || return 0
++
++	dev=$(uci -q get network.wan6.device)
++	case "$dev" in
++		@wan) return 0 ;;
++		eth*|"")
++			uci -q set network.wan6.device="@wan"
++			uci -q commit network
++			logger -t fix-ipv6 "rebound wan6 from ${dev:-unset} to @wan (pppoe)"
++			;;
++		*) return 0 ;;
++	esac
++}
++
++fix_lan6() {
++	[ -e /proc/sys/net/ipv6 ] || return 0
++	uci -q get network.lan >/dev/null 2>&1 || return 0
++
++	local c6=0
++
++	# Prefix delegation size: without it lan never derives an address from the
++	# delegated prefix, so there is nothing to advertise.
++	if [ -z "$(uci -q get network.lan.ip6assign)" ]; then
++		uci -q set network.lan.ip6assign="60"
++		uci -q commit network
++		c6=1
++		logger -t fix-ipv6 "set network.lan.ip6assign=60"
++	fi
++
++	uci -q get dhcp.lan >/dev/null 2>&1 || return 0
++
++	if [ -z "$(uci -q get dhcp.lan.ra)" ]; then
++		uci -q set dhcp.lan.ra="server"
++		uci -q set dhcp.lan.dhcpv6="server"
++		[ -n "$(uci -q get dhcp.lan.ra_slaac)" ] || uci -q set dhcp.lan.ra_slaac="1"
++		uci -q commit dhcp
++		c6=1
++		logger -t fix-ipv6 "set dhcp.lan.ra/dhcpv6=server"
++	fi
++
++	# Only bounce odhcpd if it is already running. At S18 it has not started
++	# yet (it lives at S35), and starting it here would race network (S20):
++	# odhcpd would come up with no prefix to serve. Its own boot script picks
++	# up the config change we just wrote.
++	if [ "$c6" -eq 1 ] && pgrep -f /usr/sbin/odhcpd >/dev/null 2>&1; then
++		/etc/init.d/odhcpd restart >/dev/null 2>&1
++	fi
++	return 0
++}
++
++start() { fix_wan6; fix_lan6; }
++boot() { fix_wan6; fix_lan6; }
+diff --git a/net/mwan3/files/etc/uci-defaults/mwan3-fix-ipv6 b/net/mwan3/files/etc/uci-defaults/mwan3-fix-ipv6
+new file mode 100755
+index 0000000..1281995
+--- /dev/null
++++ b/net/mwan3/files/etc/uci-defaults/mwan3-fix-ipv6
+@@ -0,0 +1,100 @@
++#!/bin/sh
++# Make IPv6 usable on PPPoE.
++#
++# Three independent defects combine to blackhole every IPv6 packet. Each was
++# confirmed on a real PPPoE install (China Mobile, 2409:8a20::/64) that had a
++# public WAN address, handed LAN clients public addresses, and still could not
++# send a single IPv6 packet:
++#
++# 1. mwan3 interface wan6 ships disabled (`enabled 0`). default_rule_v6 matches
++#    ::/0 and points at the balanced policy; a policy whose IPv6 members are all
++#    down resolves to `unreachable`, so the traffic is dropped in the routing
++#    layer before any firewall decision. Symptom in `ip -6 rule`:
++#        2062: from all fwmark 0x3e00/0x3f00 unreachable
++#     plus a per-prefix `... iif br-lan unreachable` rule.
++#
++# 2. network.wan6 keeps the device config_generate wrote for the *default* dhcp
++#    proto -- the bare NIC (eth1). Switching wan to pppoe afterwards leaves wan6
++#    bound to a device that carries no PPP session, so DHCPv6 never starts and
++#    mwan3 can never track the link. On PPPoE it must be `@wan`.
++#
++# 3. The stock IPv6 track targets are Cloudflare/Facebook addresses that do not
++#    answer from a Chinese WAN, so even a correctly bound wan6 reports down.
++#
++# Only acts on shapes it recognises, so a hand-tuned setup survives.
++
++[ -f /etc/config/network ] || exit 0
++
++NEW6="2400:3200::1 2400:3200:baba::1 240c::6666"
++changed=0
++
++# --- 1+2) PPPoE family wiring ---------------------------------------------
++wan_proto=$(uci -q get network.wan.proto)
++
++if [ "$wan_proto" = "pppoe" ]; then
++	# Ask pppd for IPV6CP but do NOT let it auto-create a dynamic wan_6: the
++	# static wan6 below owns DHCPv6, and two clients on one link fight.
++	cur6=$(uci -q get network.wan.ipv6)
++	case "$cur6" in
++		auto|"")
++			uci -q set network.wan.ipv6="1"
++			changed=1
++			;;
++	esac
++
++	if ! uci -q get network.wan6 >/dev/null 2>&1; then
++		uci -q batch <<-EOC
++			set network.wan6=interface
++			set network.wan6.proto="dhcpv6"
++			set network.wan6.device="@wan"
++			set network.wan6.reqaddress="try"
++			set network.wan6.reqprefix="auto"
++		EOC
++		changed=1
++		logger -t mwan3-migrate "created network.wan6 bound to @wan"
++	else
++		dev=$(uci -q get network.wan6.device)
++		if [ "$dev" != "@wan" ]; then
++			uci -q set network.wan6.device="@wan"
++			changed=1
++			logger -t mwan3-migrate "rebound network.wan6 from ${dev:-unset} to @wan"
++		fi
++		proto6=$(uci -q get network.wan6.proto)
++		if [ -z "$proto6" ]; then
++			uci -q set network.wan6.proto="dhcpv6"
++			changed=1
++		fi
++	fi
++fi
++
++# --- 3) IPv6 tracking: enable the interface, use reachable probes ---------
++if uci -q get mwan3.wan6 >/dev/null 2>&1; then
++	if [ "$(uci -q get mwan3.wan6.enabled)" = "0" ]; then
++		uci -q set mwan3.wan6.enabled="1"
++		changed=1
++		logger -t mwan3-migrate "enabled mwan3 wan6 (was disabled, blackholing IPv6)"
++	fi
++
++	cur=$(uci -q get mwan3.wan6.track_ip)
++	if [ -n "$cur" ]; then
++		norm=$(echo "$cur" | tr -s " " | sed "s/^ //;s/ $//")
++		case "$norm" in
++			"2606:4700:4700::1001 2606:4700:4700::1111 2620:0:ccd::2 2620:0:ccc::2")
++				uci -q delete mwan3.wan6.track_ip
++				for ip in $NEW6; do
++					uci -q add_list "mwan3.wan6.track_ip=$ip"
++				done
++				changed=1
++				logger -t mwan3-migrate "replaced IPv6 track targets with domestic resolvers"
++				;;
++		esac
++	fi
++fi
++
++if [ "$changed" -eq 1 ]; then
++	uci -q commit network 2>/dev/null
++	uci -q commit mwan3 2>/dev/null
++	/etc/init.d/mwan3 restart >/dev/null 2>&1
++fi
++
++exit 0
+diff --git a/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips b/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips
+new file mode 100755
+index 0000000..977f908
+--- /dev/null
++++ b/net/mwan3/files/etc/uci-defaults/mwan3-fix-track-ips
+@@ -0,0 +1,81 @@
++#!/bin/sh
++# Normalise mwan3 tracking on upgrade.
++#
++# /etc/config/mwan3 is a conffile: sysupgrade preserves it, so a new default
++# never reaches an existing install. This migrates the known-bad shapes once
++# and then leaves the file alone.
++#
++# Three problems are handled.
++#
++# 1. Unreachable targets. The stock list is 1.0.0.1 / 1.1.1.1 / 208.67.x.x,
++#    and the OpenDNS resolvers do not answer ICMP on many Chinese networks,
++#    so mwan3track reported the link as flapping while it was fine.
++#
++# 2. Foreign targets that flap. A later build used 8.8.8.8 / 1.0.0.1 /
++#    9.9.9.9 / 94.140.14.14. Those answer ICMP here, but a single lossy hop
++#    still produces failed/recovered pairs on a healthy link. Domestic
++#    resolvers are simply more stable from a Chinese WAN.
++#
++# 3. reliability > target count. This is the fatal one and it is silent:
++#    mwan3 needs `reliability` targets up before the interface counts as
++#    online, so a one-target list with reliability 2 keeps the interface
++#    permanently offline even though every probe succeeds. Seen in the wild
++#    after a user narrowed track_ip by hand and left reliability at 2.
++#
++# Anything the user customised beyond these exact shapes is left untouched.
++
++[ -f /etc/config/mwan3 ] || exit 0
++
++NEW="223.5.5.5 119.29.29.29 180.76.76.76 1.2.4.8"
++
++changed=0
++
++replace_list() {
++	local section="$1"
++	uci -q delete "mwan3.$section.track_ip"
++	for ip in $NEW; do
++		uci -q add_list "mwan3.$section.track_ip=$ip"
++	done
++	logger -t mwan3-migrate "replaced track_ip on $section with domestic targets"
++	changed=1
++}
++
++for section in $(uci -q show mwan3 | sed -n "s/^mwan3\.\([^.=]*\)=interface$/\1/p"); do
++	family=$(uci -q get "mwan3.$section.family")
++	[ "$family" = "ipv4" ] || continue
++
++	cur=$(uci -q get "mwan3.$section.track_ip")
++	[ -n "$cur" ] || continue
++
++	# normalise whitespace for comparison
++	norm=$(echo "$cur" | tr -s " " | sed "s/^ //;s/ $//")
++	n=$(echo "$norm" | wc -w)
++
++	case "$norm" in
++		# stock upstream list
++		"1.0.0.1 1.1.1.1 208.67.222.222 208.67.220.220")
++			replace_list "$section"
++			continue
++			;;
++		# foreign list shipped by v8/v9
++		"8.8.8.8 1.0.0.1 9.9.9.9 94.140.14.14")
++			replace_list "$section"
++			continue
++			;;
++	esac
++
++	# A short list with an unreachable reliability is dead even if the user
++	# picked the targets deliberately, so widen it rather than trust them.
++	rel=$(uci -q get "mwan3.$section.reliability")
++	if [ -n "$rel" ] && [ "$n" -lt "$rel" ]; then
++		replace_list "$section"
++		continue
++	fi
++done
++
++[ "$changed" -eq 1 ] && {
++	uci -q commit mwan3
++	/etc/init.d/mwan3 restart >/dev/null 2>&1
++}
++
++exit 0
+diff --git a/net/mwan3/files/usr/sbin/mwan3track b/net/mwan3/files/usr/sbin/mwan3track
+index 81367c8..9512127 100755
+--- a/net/mwan3/files/usr/sbin/mwan3track
++++ b/net/mwan3/files/usr/sbin/mwan3track
+@@ -225,7 +225,7 @@ main() {
+ 	local keep_failure_interval check_quality failure_latency
+ 	local recovery_latency failure_loss recovery_loss
+ 
+-	local max_ttl httping_ssl track_ips do_log
++	local max_ttl httping_ssl track_ips do_log prev_state
+ 
+ 	INTERFACE=$1
+ 	STATUS=""
+@@ -358,17 +358,22 @@ main() {
+ 					;;
+ 				esac
+ 				do_log=""
++				# Log only when a target actually changes state. The original
++				# test (score > up) stays true forever while the interface is
++				# healthy -- score is pinned at down+up -- so every failed probe
++				# wrote a line on every interval, forever.
++				prev_state="$(cat "$MWAN3TRACK_STATUS_DIR/$INTERFACE/TRACK_${track_ip}" 2>/dev/null)"
+ 				if [ $check_quality -eq 0 ]; then
+ 					if [ $result -eq 0 ]; then
+ 						let host_up_count++
+ 						update_status "$track_ip" "up"
+ 
+-						[ $score -le $up ] && do_log="success"
++						[ "$prev_state" = "down" ] && do_log="recovered"
+ 					else
+ 						let lost++
+ 						update_status "$track_ip" "down"
+ 
+-						[ $score -gt $up ] && do_log="failed"
++						[ "$prev_state" != "down" ] && do_log="failed"
+ 					fi
+ 					[ -n "$do_log" ] && LOG info "Check ($track_method) ${do_log} for target \"$track_ip\" on interface $INTERFACE ($DEVICE). Current score: $score"
+ 
+@@ -377,12 +382,12 @@ main() {
+ 						let lost++
+ 						update_status "$track_ip" "down" $latency $loss
+ 
+-						[ $score -gt $up ] && do_log="failed"
++						[ "$prev_state" != "down" ] && do_log="failed"
+ 					elif [ "$loss" -le "$recovery_loss" ] && [ "$latency" -le "$recovery_latency" ]; then
+ 						let host_up_count++
+ 						update_status "$track_ip" "up" $latency $loss
+ 
+-						[ $score -le $up ] && do_log="success"
++						[ "$prev_state" = "down" ] && do_log="recovered"
+ 					else
+ 						echo "skipped" > $MWAN3TRACK_STATUS_DIR/$INTERFACE/TRACK_${track_ip}
+ 					fi

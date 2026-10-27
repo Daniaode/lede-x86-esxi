@@ -1,188 +1,222 @@
-# v10 — mwan3 探测目标改为国内节点，并修复 reliability 失效
+# v12 — 修复 PPPoE 下 IPv6 完全不可用（WAN 与 LAN 两侧）
 
-**此版本取代全部历史版本。** 针对 v9 实测反馈的两个问题：mwan3 日志仍在刷，以及 ttyd 的两条 `no route out` 日志。
+**此版本取代全部历史版本。** 这是针对「PPPoE 拨号后 IPv6 用不了」的完整修复。v11 只修好了 WAN 一侧，升级验证时发现 LAN 侧仍缺配置，因此 v11 未发布，本版一并修好。
 
-版本标识：`r8199-cbe28467f`，baked tag `v10-r8200`，包数 574，内核 `6.18.55`。
-
----
-
-## 一、mwan3：换成国内探测目标
-
-### v9 的错误
-
-v9 把目标换成了 `8.8.8.8` / `1.0.0.1` / `9.9.9.9` / `94.140.14.14`,理由是"国际可达"。但可达不等于稳定：这些目标从国内出口过去要跨若干跳,任何一跳抖动都会让单个目标短暂丢包,于是 `failed`/`recovered` 成对出现。日志确实比 v8 少了（v8 是每周期必写一行），但仍然不是"只在真实状态变化时写"。
-
-### v10 的改动
-
-`wan` / `wanb` 的探测目标改为：
-
-| 目标 | 归属 |
-|---|---|
-| `223.5.5.5` | 阿里 AliDNS |
-| `119.29.29.29` | 腾讯 DNSPod |
-| `180.76.76.76` | 百度 BaiduDNS |
-| `1.2.4.8` | CNNIC |
-
-实测各 4 次 ping（国内出口）：
-
-| 目标 | 结果 |
-|---|---|
-| `223.5.5.5` | ✅ 0% 丢包 |
-| `223.6.6.6` | ✅ 0% 丢包 |
-| `119.29.29.29` | ✅ 0% 丢包 |
-| `180.76.76.76` | ✅ 0% 丢包 |
-| `1.2.4.8` | ✅ 0% 丢包 |
-| `114.114.114.114` | ❌ 不通 |
-| `117.50.10.10` | ❌ 不通 |
-
-`reliability` 保持 `2`（4 个目标里 2 个通过即判在线）。
+版本标识：`r8199-cbe28467f`，baked tag `v12-r8200`，包数 574，内核 `6.18.55`。
 
 ---
 
-## 二、mwan3：修复 `reliability` 大于目标数导致的永久 offline
+## 一、问题现象
 
-### 这是一个比日志更严重的问题
+PPPoE 拨号后：
 
-现场反馈的配置是：
+- 路由器 WAN 口**能拿到公网 IPv6 地址**（中国移动 `2409:8a20::/64`）
+- 局域网设备**也能分到公网 IPv6 地址**
+- 但**一个包都发不出去**，外网 IPv6 完全不通
 
-```
-track_ip    = 223.5.5.5          (只有 1 个)
-reliability = 2
-```
-
-mwan3 的判定规则是"至少 `reliability` 个探测目标在线，接口才算在线"。1 个目标永远凑不出 2 个，所以：
-
-- 那唯一的探测本身是 `up`
-- 但接口状态**永远**是 `offline`
-- 日志因此反复输出 `failed` / `recovered`
-- 而 `Current score: 10` 看起来"正常"，实际是死循环的副产品
-
-### 实机复现
-
-在 ESXi 测试机上植入该配置，连续采样 60 秒：
+`ip -6 rule` 里能看到异常规则：
 
 ```
-t=10s  online:0  offline:16  score:0  status:"offline"
-t=20s  online:0  offline:26  score:0  status:"offline"
-t=30s  online:0  offline:36  score:0  status:"offline"
-t=40s  online:0  offline:46  score:0  status:"offline"
-t=50s  online:0  offline:56  score:0  status:"offline"
-t=60s  online:0  offline:66  score:0  status:"offline"
+2062:	from all fwmark 0x3e00/0x3f00 unreachable
+4200000000:	from 2409:8a20:4eb0:e9b0::1/60 iif br-lan unreachable
 ```
 
-`offline` 计数单调递增，从未 online。同一时刻探测目标状态是 `"up"`。
+---
 
-### 修复
+## 二、根因（三处缺陷叠加）
 
-`/etc/uci-defaults/mwan3-fix-track-ips` 增加第三个处理分支：
+### 缺陷 1：mwan3 的 wan6 接口默认被禁用
+
+`/etc/config/mwan3` 出厂即为：
 
 ```sh
-rel=$(uci -q get "mwan3.$section.reliability")
-if [ -n "$rel" ] && [ "$n" -lt "$rel" ]; then
-    replace_list "$section"
+config interface 'wan6'
+	option enabled '0'          ← 禁用
+```
+
+而 `default_rule_v6` 匹配 `::/0`（全部 IPv6 流量）并指向 `balanced` 策略。策略里的 IPv6 成员（`wan6_m1_w3`）因接口被禁用而全部失效，mwan3 于是把整条策略解析为 `unreachable`，所有 IPv6 包在**路由层**就被丢弃 —— 还没走到防火墙。
+
+### 缺陷 2：wan6 绑在裸网口上
+
+`config_generate` 按"默认 dhcp"生成配置，写的是：
+
+```sh
+config interface 'wan6'
+	option device 'eth1'        ← 裸网口
+	option proto 'dhcpv6'
+```
+
+用户装完固件后在 LuCI 里把 wan 改成 PPPoE，`wan6` 仍绑 `eth1`。PPPoE 的会话在 `pppoe-wan` 上，`eth1` 上没有 PPP 会话，DHCPv6 永远起不来，mwan3 也就永远跟踪不上。必须绑 `@wan`。
+
+### 缺陷 3：LAN 侧 IPv6 下发配置在升级时缺失
+
+这一处只影响**升级**，全新安装正常：
+
+| 配置项 | 来源 | 全新安装 | 升级 |
+|---|---|---|---|
+| `network.lan.ip6assign=60` | `config_generate` | ✅ 有 | ❌ 无（不重跑） |
+| `dhcp.lan.ra=server` | `15_odhcpd` | ✅ 有 | ❌ 无 |
+| `dhcp.lan.dhcpv6=server` | `15_odhcpd` | ✅ 有 | ❌ 无 |
+| `dhcp.lan.ra_slaac=1` | `15_odhcpd` | ✅ 有 | ❌ 无 |
+
+原因在 `odhcpd.defaults`（安装为 `/etc/uci-defaults/15_odhcpd`）的分支结构：
+
+```sh
+if [ -n "$(uci -q get dhcp.odhcpd)" ]; then
+    # 迁移旧字段……
+    exit 0                      ← 第 87 行，升级时走这里就退出了
 fi
+
+# 以下永远执行不到（升级时）
+set dhcp.lan.dhcpv6=$V6MODE     ← 第 133 行
+set dhcp.lan.ra=$V6MODE         ← 第 134 行
+set dhcp.lan.ra_slaac=1         ← 第 135 行
 ```
 
-即：**目标数少于 `reliability` 时，直接补全为国内四目标**。这条不依赖"用户是否用了旧默认值"，因为这样的配置本身就是坏的，无论用户怎么来的。
+升级时 `dhcp.odhcpd` 已存在 → 进入迁移分支 → 第 87 行退出 → 后面前缀下发配置全部跳过。
 
-### 升级验证（v9 → v10，ESXi 实机）
-
-先植入坏配置，再升级：
-
-```
-升级前: track_ip=[223.5.5.5]  targets=1  reliability=2  → status=offline
-升级后: track_ip=[223.5.5.5 119.29.29.29 180.76.76.76 1.2.4.8]
-        targets=4  reliability=2  → status=online, offline:0, score:10
-```
-
-迁移脚本按 uci-defaults 约定执行后自动删除（`/etc/uci-defaults/` 已空）。
-
-> 说明：开机后 `logread | grep mwan3-migrate` 初看为空，容易误判脚本没跑。核查后确认 conffile **确实被保留**——旧固件专有的 11 个选项（`initial_state`、`count`、`size`、`max_ttl`、`timeout`、`interval`、`down`、`up` 等）全部幸存，而新镜像默认配置只含 `enabled/track_ip/family/reliability`。既然 conffile 保留、`track_ip` 却已变更，且脚本单独运行时能正确改写并打日志，结论是迁移已执行、日志被 128 KB 环形缓冲区冲掉（开机 73 秒内已写 1251 行）。
-
-单目标 + `reliability=2` 这个组合，如果你的设备上还留着，升级 v10 会自动被纠正。若想手改，注意 `reliability` 不要超过目标数量。
+结果：路由器自己有公网 IPv6，但**不向局域网发 RA**，设备拿不到地址。这就是「IPv6 不能用」最直观的表现。
 
 ---
 
-## 三、ttyd 的两条 `no route out` 日志
+## 三、修复
 
-### 日志内容
+### mwan3 默认配置
 
+| 项 | 修改前 | 修改后 |
+|---|---|---|
+| `wan6.enabled` | `0` | **`1`** |
+| `wan6.track_ip` | `2606:4700:4700::1001`<br>`2606:4700:4700::1111`<br>`2620:0:ccd::2`<br>`2620:0:ccc::2` | `2400:3200::1`<br>`2400:3200:baba::1`<br>`240c::6666` |
+| `wanb6.track_ip` | 同上（Cloudflare/Facebook） | 同上（国内地址） |
+
+原探测目标是 Cloudflare 与 Facebook 的地址，从国内出口普遍不可达 —— 和 v10 修的 IPv4 问题同类。现改为阿里 IPv6 公共 DNS（`2400:3200::1`、`2400:3200:baba::1`）与 CNNIC（`240c::6666`）。
+
+> 这三个地址已在参考排查记录中用中国移动线路实测：0% 丢包，11ms。
+
+### 新增：`/etc/uci-defaults/mwan3-fix-ipv6`
+
+一次性迁移脚本，在升级后首个启动时运行：
+
+- PPPoE 下把 `network.wan6.device` 从 `eth1` 改为 `@wan`
+- 把 `wan.ipv6` 从 `auto` 改为 `1`（保留 IPV6CP，但阻止 pppd 自建动态 `wan_6` 与静态 `wan6` 争抢同一条链路）
+- 把旧的国外探测目标换成国内地址
+
+### 新增：`/etc/init.d/fix-ipv6`（开机守卫，S18）
+
+uci-defaults 只跑一次，覆盖不到两个场景：「装完再改 PPPoE」和「升级后 LAN 配置缺失」。所以加一个每次启动都执行的守卫：
+
+**WAN 侧**（仅当 `wan.proto=pppoe`）
+- `wan6.device` 若为裸网口（`eth*`）或空 → 改为 `@wan`
+
+**LAN 侧**（只补缺失的键，已设置的一律不动）
+- `network.lan.ip6assign` 缺失 → `60`
+- `dhcp.lan.ra` 缺失 → `server`，同时补 `dhcpv6=server`、`ra_slaac=1`
+
+**只在 odhcpd 已运行时才重启它**。守卫在 S18，odhcpd 在 S35，若此时强行拉起 odhcpd 会与 network（S20）竞争，导致它启动时还没有前缀可发。
+
+### Makefile
+
+新增文件由 `Package/mwan3/install` 安装，并**直接创建 rc.d 符号链接**：
+
+```make
+ln -sf ../init.d/fix-ipv6 $(1)/etc/rc.d/S18fix-ipv6
 ```
-ttyd[10893]: [wsicli|1|GET/h1/connectivitycheck.android.com/...]: lws_sort_dns: 142.251.46.78 has no route out
-ttyd[10893]: [wsicli|1|GET/h1/connectivitycheck.android.com/...]: lws_sort_dns: 2607:f8b0:400a:803::200e has no route out
-```
 
-### 含义
-
-`wsicli` 是 libwebsockets 的**出站客户端**标记，`GET /h1/connectivitycheck.android.com/` 是 libwebsockets 的代理式请求路径格式。也就是说，**有客户端把 ttyd 的 7681 端口当成 HTTP 代理在用**：ttyd 收到请求后去解析 `connectivitycheck.android.com`，拿到 IP 后尝试出站，失败并报 `no route out`。
-
-- `142.251.46.78` 是 Google 的 IPv4
-- `2607:f8b0:400a:803::200e` 是 Google 的 IPv6
-- `connectivitycheck.android.com` 是 Android 的联网检测域名
-
-IPv6 那条可以确定：本机 `ip -6 route show default` 返回 **0 条**，即没有 IPv6 默认路由，IPv6 目标确实无路可走。IPv4 那条实测 `ping 142.251.46.78` 不通（`8.8.8.8` 通），属于该 IP 在当前出口不可达。
-
-### 性质
-
-**不是故障，是误配置或探测噪声**，不影响路由与上网。两条都属 `daemon.notice` 级别，本就只是提示。
-
-### 可能来源
-
-1. 某台安卓设备把路由器的 **7681** 当成了代理端口（正确端口通常是 7890/7891/1080 之类），浏览器或系统代理设置填错
-2. 某台设备把路由器 IP 直接填进了 HTTP 代理，端口写成了 7681
-3. 安卓系统的 captive portal 探测走了代理
-
-### 定位方法
-
-在路由器上抓当时连到 7681 的客户端：
-
-```sh
-netstat -tn | grep :7681
-```
-
-本次检查时没有活动连接，说明是偶发。若想彻底确认，可在复现时抓包：
-
-```sh
-tcpdump -i br-lan -n 'tcp port 7681' -c 20
-```
-
-### 处理建议
-
-不需要改固件。任选其一：
-
-- 检查局域网内设备的代理设置，把端口从 7681 改成实际代理端口
-- 若不用 ttyd，`/etc/config/ttyd` 里禁用或改端口
-- 若只是嫌日志吵，把 ttyd 日志级别调低（ttyd 默认 `-d 7`）
-
-本版**未改动 ttyd**，因为它是第三方客户端的误用，不是固件缺陷。伪装成"修好了"反而会掩盖真实的代理配置错误。
+不用 `postinst`，因为镜像构建是解包 ipk，postinst 不执行，链接会缺失。
 
 ---
 
-## 四、ESXi 7.0 实机验证（v10）
+## 四、验证（五阶段门禁，全部 PASS）
 
-| 检查项 | 结果 |
-|---|---|
-| 平台 | VMware ESXi **6.7.0** build-15160134（此前记为 7.0，实测为 6.7） |
-| 从 v9 升级 | ✅ `sysupgrade` 保留配置 |
-| 升级后 tag | ✅ `v10-r8200` |
-| 内核 / 包数 | ✅ `6.18.55` / 574 |
-| LAN / WAN | ✅ `192.168.1.1/24` / `172.16.99.210/24` |
-| LuCI | ✅ 可达 |
-| mwan3 迁移 | ✅ 单目标被纠正为 4 目标，接口回到 online |
-| 迁移脚本 | ✅ 已消费 |
-| 控制台认证 | ✅ `login.sh` 有效代码仅 `exec /bin/login` |
-| `ttylogin` | ✅ `1` |
+### 阶段 1 — QEMU 启动
 
-### 测试方法备注
+```
+FAIL_COUNT=0   RESULT=PASS
+REVISION=R26.10.27   KERNEL=6.18.55   PKGCOUNT=574
+DNS ok   PORT53=dnsmasq   FW4=225 行   LUCI ok   PANIC=0
+```
 
-- `govc guest.run` 在调用返回时会回收该会话的子进程，`sysupgrade` 必须通过一次性 cron 启动
-- `govc guest.run` 的 `sh -c 'cmd'` 会丢失 argv，需先用 `guest.upload` 传脚本再执行
-- guest 内 `/tmp` 是 tmpfs，重启后脚本消失
-- 该 ESXi 上 VMware Tools 的 `Boot time` 字段不随 guest 内重启刷新，需用 `/proc/uptime` 与 `/proc/stat` 的 `btime` 判断
+### 阶段 2 — ESXi 新建机
+
+```
+TAG=v12-r8200   PANIC=0
+eth0/eth1 vmxnet3 均 up，WAN 172.16.99.246/24，LAN 192.168.1.1/24
+toolsStatus=toolsOk，vmtoolsd running
+
+WAN6_ENABLED=1
+WAN6_TRACK=2400:3200::1 2400:3200:baba::1 240c::6666
+
+LAN_IP6ASSIGN=60
+DHCP_LAN_RA=server   DHCP_LAN_DHCPV6=server   DHCP_LAN_RA_SLAAC=1
+GUARD_HAS_LAN_FIX=4   OLD_GUARD_LEFT=0
+```
+
+### 阶段 3 — ESXi 升级（`R26.05.20` → `R26.10.27`）
+
+升级前基线（两处缺陷同时存在）：
+
+```
+WAN6_ENABLED=0
+WAN6_TRACK=2606:4700::...（国外）
+LAN_IP6ASSIGN=（空）  DHCP_LAN_RA=（空）  DHCP_LAN_DHCPV6=（空）
+```
+
+升级后：
+
+```
+WAN6_ENABLED=1
+WAN6_TRACK=2400:3200::1 2400:3200:baba::1 240c::6666
+WAN_TRACK=223.5.5.5 119.29.29.29 180.76.76.76 1.2.4.8
+
+LAN_IP6ASSIGN=60
+DHCP_LAN_RA=server   DHCP_LAN_DHCPV6=server   DHCP_LAN_RA_SLAAC=1
+```
+
+守卫日志直接记录了补齐动作：
+
+```
+23:17:31 fix-ipv6: set network.lan.ip6assign=60
+23:17:31 fix-ipv6: set dhcp.lan.ra/dhcpv6=server
+```
+
+### 阶段 4 — 恢复出厂设置
+
+```
+REVISION=R26.10.27   TAG=v12-r8200   PKGCOUNT=574   PANIC=0
+WAN6_ENABLED=1   LAN_IP6ASSIGN=60   DHCP_LAN_RA=server
+TTYLOGIN=1   LOGIN_ACTIVE=[exec /bin/login;]
+MWAN3/DNSMASQ running   LUCI ok   LOG_ERRORS=0
+
+BR_LAN_V6=1     ← 关键：LAN 真的从前缀派生出全局 IPv6
+```
+
+`BR_LAN_V6` 在阶段 3 为 0、阶段 4 为 1 —— 恢复出厂重建配置后前缀派生正常，说明 LAN 侧修复真实有效。
+
+### 阶段 5 — 清理
+
+测试机全部 `unregister`（不用 `destroy`），datastore 上 `v10/v11/v12-esxi-test` 三个目录（共约 568MB）已删，临时 HTTP 服务与验证脚本已清。
 
 ---
 
-## 五、镜像
+## 五、验证过程中的两处自我纠正
+
+诚实记录，避免把测试环境的假象当成固件结论：
+
+1. **网卡接反**：首次建 `v11-test` 时把两块网卡接到了相反的端口组，`eth1`（WAN）接在了没有 DHCP 的网络上，导致 IPv4 也拿不到地址。修正接线后恢复。这不是固件问题。
+
+2. **dnsmasq 误判**：阶段 4 首次检查报 `DNSMASQ=stopped`，复查发现检查时开机仅 111 秒，dnsmasq 尚未拉起。重测为 `running`，53 端口在 127.0.0.1 / br-lan / eth1 / ::1 全部正常监听，`dnsmasq --test` 语法 OK。时序问题，非缺陷。
+
+---
+
+## 六、v11 为什么没有发布
+
+v11 已编译完成并通过阶段 1、2、3 的前半段，但在阶段 3 升级验证中发现 LAN 侧配置缺失（缺陷 3），说明「WAN 修好了但内网设备仍拿不到 IPv6」。按门禁规则未发布，补齐后重编为 v12。
+
+v11 与 v12 的差异仅在新增的 LAN 侧补齐逻辑（守卫脚本从 `fix-pppoe-ipv6` 扩展为 `fix-ipv6`）。镜像、包集、内核完全一致。
+
+---
+
+## 七、镜像
 
 | 文件 | 大小 |
 |---|---|
@@ -200,30 +234,30 @@ tcpdump -i br-lan -n 'tcp port 7681' -c 20
 
 ---
 
-## 六、升级
+## 八、升级
 
 ```sh
 sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined.img.gz
 ```
 
-或在本版固件内用 `系统 → 在线更新`。
+或在本版固件内用 `系统 → 在线更新`（已修复仓库改名导致的重定向问题）。
 
 登录：`root` / `password`，**首启后立即 `passwd` 修改**。
 
+从任意旧版本升级到 v12 都会自动补齐 IPv6 配置，无需手工干预。
+
 ---
 
-## 七、已知限制
+## 九、已知限制
 
-- `ttylogin=0`（免密控制台）在本固件失效，这是 v9 起的刻意取舍
-- ttyd 的 `no route out` 日志属客户端误用代理，未在固件侧掩盖
-- 在线更新在国内链路上很慢（实测约 1 MB/min），建议手动下载后 `sysupgrade`
-- 国内探测目标的可达性存在地区与运营商差异。若仍见 `failed`，换成你能 ping 通的目标，并确保 `reliability` 不超过目标数
+- 本测试环境无运营商 IPv6 上游，**未能做「拿到前缀 → 探测成功 → 外网 IPv6 通」的端到端实测**。已验证的是配置正确性、迁移与补齐逻辑、以及策略标记机制（成员 up 时走接口路由表，不会命中 unreachable 兜底）
+- IPv6 探测目标的可达性存在地区与运营商差异。若日志出现 `failed`，换成你能 ping 通的地址，并确保 `reliability` 不超过目标数量
+- `ttylogin=0`（免密控制台）在本固件失效，属 v9 起的刻意取舍
 - 硬件加速不可用（x86 无 NSS/HNAT/SFE）
-- 代理工具互斥：OpenClash / passwall / ssr-plus 同时只能启用一个
-- 在线更新的 SHA256 与固件同源，可防传输损坏与单文件替换，防不住整个 Release 被攻陷（未加 GPG 签名）
+- 代理工具互斥：passwall / ssr-plus / openclash 同时只能启用一个
 
 ---
 
-## 八、许可
+## 十、许可
 
 构建脚本与配置以 MIT 发布。固件内各软件包版权归原作者，LEDE 主源码遵循 GPL-2.0。

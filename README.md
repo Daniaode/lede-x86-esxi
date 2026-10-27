@@ -5,6 +5,8 @@
 
 基于 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede)，内核 **6.18.55**。
 
+各版本变更见 [Releases](../../releases)。最新为 **v12**：修复 PPPoE 下 IPv6 完全不可用——mwan3 的 `wan6` 默认启用、PPPoE 下自动绑定 `@wan`、探测目标改国内地址，并补齐升级后缺失的 LAN 侧 `RA`/`DHCPv6`/`ip6assign`。
+
 ---
 
 ## 当前版本
@@ -12,7 +14,7 @@
 | 项目 | 值 |
 |---|---|
 | 版本标识 | `r8199-cbe28467f` |
-| baked tag | `v10-r8200` |
+| baked tag | `v12-r8200` |
 | LEDE 基线 | `24.10.5` |
 | 内核 | `6.18.55` |
 | 目标 | `x86/64` Generic |
@@ -188,6 +190,7 @@
 | `0005-mwan3-track-ips.patch` | mwan3 探测目标替换 + 仅在状态翻转时记录日志 |
 | `0006-login-always-auth.patch` | `login.sh` 不再读取 `ttylogin`，控制台无条件要求密码 |
 | `0007-mwan3-domestic-targets.patch` | mwan3 国内探测目标 + `reliability` 超过目标数时自动补全 |
+| `0008-ipv6-pppoe-lan.patch` | PPPoE 下 IPv6：启用 mwan3 wan6、绑定 `@wan`、国内 IPv6 探测目标、补齐 LAN 侧 RA/DHCPv6/ip6assign |
 
 ---
 
