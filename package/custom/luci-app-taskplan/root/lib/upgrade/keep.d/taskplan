@@ -1,0 +1,2 @@
+# taskplan keeps its scripts and log under /etc/taskplan/.
+/etc/taskplan/

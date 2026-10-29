@@ -1,191 +1,208 @@
-# v14 — 修复在线更新刷写时的 XHR 超时误报
+# v15 — 修复 ddns-go 等包升级后丢失配置，并加入 kiddin9 更新源
 
-**此版本取代全部历史版本。** 修复一个长期存在的接口缺陷：在固件内点「在线更新 → 安装」后，界面报 `XHR request timed out`，但固件其实正在正常写入。
+**此版本取代全部历史版本。** 两件事：为三个包补上 `keep.d` 持久化声明，以及在固件内加入 kiddin9 社区源。
 
-版本标识：`r8201-0185dc581`，baked tag `v14-r8202`，内核 `6.18.58`，包数 575。
-
----
-
-## 一、现象
-
-在 LuCI 里用「系统 → 在线更新」安装新固件，点击安装确认后：
-
-1. 弹出「正在安装…」窗口
-2. 约 20 秒后界面报错 `XHR request timed out`
-3. 但设备实际上已开始刷写，稍后自动重启并升级成功
-
-也就是说：**升级是成功的，报错是误报**。但很容易让人误以为失败而在写入过程中断电，这是真实风险。
+版本标识：`r8201-0185dc581`，baked tag `v15-r8202`，内核 `6.18.58`，包数 575。
 
 ---
 
-## 二、根因
+## 一、修复：ddns-go 配置升级后丢失
 
-### 同步调用一个永不返回的函数
+### 问题
 
-`/usr/sbin/online-update` 的 `cmd_apply` 原本直接同步调用 sysupgrade：
+在线升级后，ddns-go 的「服务开关」还在，但**所有 DDNS 任务（域名、解析记录、API Token）全部消失**，需要重新添加。
+
+### 根因
+
+ddns-go 的配置分成两半：
+
+| 文件 | 内容 | 升级后 |
+|---|---|---|
+| `/etc/config/ddns-go` | UCI 外壳：`enabled`、`listen`、`ttl` | ✅ 保留 |
+| `/etc/ddns-go/config.yaml` | **真实配置**：域名、账号、Token | ❌ 丢失 |
+
+UCI 文件能保留，是因为 `base-files` 的 `keep.d` 里有 `/etc/config/` 这条**整目录**规则，与包本身无关。
+
+而 YAML 会丢，是因为 `ddns-go` 包：
+- 没有 `conffiles` 声明
+- 没有 `keep.d` 文件
+- `/etc/sysupgrade.conf` 里也没有
+
+三处都没有，`sysupgrade -l` 就不会收录它。
+
+### 修复
+
+在源码层为三个包补上 `keep.d` 声明（不是运行时脚本）：
+
+| 文件 | 内容 |
+|---|---|
+| `/lib/upgrade/keep.d/ddns-go` | `/etc/ddns-go/` |
+| `/lib/upgrade/keep.d/smartdns` | `/etc/smartdns/` |
+| `/lib/upgrade/keep.d/taskplan` | `/etc/taskplan/` |
+
+`ddns-go` 与 `smartdns` 是 feed 包，直接改会被 `feeds update` 还原，因此放进 `package/base-files/files/lib/upgrade/`（由 base-files 的 `$(CP) ./files/*` 整体安装）。`taskplan` 是自有包，放进它自己的 `root/` 树。
+
+顺带修复了同类的 `smartdns`（自定义规则在 `/etc/smartdns/custom.conf`、`conf.d/`）与 `taskplan`（脚本在 `/etc/taskplan/`），这两个也有同样的丢失风险。
+
+### ⚠️ 重要限制：本次升级仍会丢一次
+
+`sysupgrade` 的备份清单由**正在运行的旧系统**生成：
 
 ```sh
-if [ "$keep" = "1" ]; then
-    sysupgrade "$DL_DIR/firmware.img.gz"
-else
-    sysupgrade -n "$DL_DIR/firmware.img.gz"
-fi
+# /sbin/sysupgrade
+sysupgrade_init_conffiles="build_list_of_backup_config_files"
+# → list_static_conffiles 读 /etc/sysupgrade.conf 和 /lib/upgrade/keep.d/*
 ```
 
-sysupgrade 会关闭网络、写盘、重启，**这个调用永远不会返回**。
+新镜像里的 `keep.d` 无法追溯影响这次升级。
 
-### 超时链条
+实测证据：
 
-```
-sysupgrade 阻塞
-  → rpcd 的 ucode 用 popen 读 stdout 直到 EOF，一直等
-  → 浏览器 POST /cgi-bin/luci/admin/ubus 挂住
-  → rpc.js:38   timeout: (L.env.rpctimeout ?? 20) * 1000
-  → luci.js:835 rejectFn(new Error('XHR request timed out'))
-```
+| 场景 | 结果 |
+|---|---|
+| v14（无 keep.d）→ v15，升级前种下 ddns 配置 | **GONE**（丢失） |
+| v15（有 keep.d）→ v15 同版本重刷，种下同一份配置 | **PRESENT**，SHA256 完全一致 |
 
-`rpc.js` 的默认 RPC 超时是 20 秒，所以 20 秒后必然报错。
+也就是说：**v15 修复的是「从 v15 升级到以后版本」**。如果你从 v14 或更早的版本升级到 v15，ddns-go 配置**依然会丢一次**。
 
-### 上游明知此问题
-
-LuCI 原生刷写页 `flash.js:408` 有明确注释：
-
-```js
-/* Currently the sysupgrade rpc call will not return, hence no promise handling */
-fs.exec('/sbin/sysupgrade', args);
-```
-
-上游因此故意不处理这个 promise。本组件却依赖 `stdout` 返回值判断结果，所以撞上了超时。
-
-### 对照
-
-同一个脚本里的下载路径 `cmd_start` 本来就用了 `setsid ... &` 脱离会话（否则下载会被 rpcd 回收），而 `apply` 没有。
-
----
-
-## 三、修复（三处）
-
-### 1. `cmd_apply` 让 sysupgrade 脱离会话
-
-hash 校验仍留在前台（快，且失败必须拦住不刷），只把慢且会断网的刷写部分放到后台：
+### 升级前请手动备份
 
 ```sh
-if [ "$keep" = "1" ]; then
-    setsid sh -c "sysupgrade '$DL_DIR/firmware.img.gz' >/overlay/online-update-sysupgrade.log 2>&1" \
-        </dev/null >/dev/null 2>&1 &
-else
-    setsid sh -c "sysupgrade -n '$DL_DIR/firmware.img.gz' >/overlay/online-update-sysupgrade.log 2>&1" \
-        </dev/null >/dev/null 2>&1 &
-fi
-
-echo "RESULT=started"
-echo "STATE=APPLYING"
+# 升级到 v15 之前，在旧固件上执行
+tar czf /tmp/ddns-backup.tar.gz /etc/ddns-go/ /etc/smartdns/ /etc/taskplan/ 2>/dev/null
 ```
 
-刷写日志现在落在 `/overlay/online-update-sysupgrade.log`，重启后仍可查。
-
-### 2. LuCI JS 补上 catch
-
-原 `.then()` 没有 `.catch()`，超时会变成未捕获 rejection。现在：
-
-- 收到 `RESULT=started` → 视为已移交，保留「正在安装」弹窗
-- 超时或连接断开 → 同样视为已移交，不弹错误框
-
-### 3. 排查中发现的第二个隐患
-
-`check` / `download` 里的 GitHub API 调用超时原本是 20 秒，**与 XHR 的 20 秒完全相同**。GitHub 响应慢时两者赛跑，浏览器先超时 → 用户看到同样的报错。改为 15 秒，留出余量让 helper 自己返回 `RESULT=error REASON=network`。
+升级完成后解压回去即可。从 v15 开始的后续升级不再需要此步骤。
 
 ---
 
-## 四、验证（五阶段，全部 PASS）
+## 二、新增：kiddin9 社区更新源
+
+固件内加入：
+
+```
+src/gz kiddin9 https://dl.openwrt.ai/latest/packages/x86_64/kiddin9
+```
+
+该源可用性已验证（HTTP 200，1163 个包）。
+
+### 为什么用独立文件而不是追加到 distfeeds.conf
+
+`/etc/opkg/distfeeds.conf` 每次构建时由 `FeedSourcesAppendOPKG` 重新生成，追加的行会被静默丢弃。改为独立文件 `/etc/opkg/kiddin9.conf`。
+
+opkg 会读取 `/etc/opkg/` 下任意 `*.conf`——这一点在真机上实测确认过（列表成功拉取并缓存到 `/var/opkg-lists/kiddin9`，145 KB）。
+
+### 签名说明
+
+该源不由本项目的构建密钥签名。若镜像保留了 `option check_signature`（默认保留），从该源安装包需要 `--force-signature`：
+
+```sh
+opkg install --force-signature <package>
+```
+
+---
+
+## 三、五阶段验证
 
 ### 阶段 1 — QEMU
 
 ```
 FAIL_COUNT=0  RESULT=PASS
-REVISION=R26.10.29  KERNEL=6.18.58  PKGCOUNT=575
+REVISION=R26.10.30  KERNEL=6.18.58  PKGCOUNT=575
 DNS ok  53=dnsmasq  FW4=225  LUCI ok  PANIC=0
 ```
 
 ### 阶段 2 — ESXi 新建机
 
 ```
-TAG=v14-r8202  PANIC=0
-eth0/eth1 vmxnet3 均 up  WAN 172.16.99.82/24  LAN 192.168.1.1/24
-toolsOk
+TAG=v15-r8202  PANIC=0
+eth0/eth1 vmxnet3 均 up  WAN 172.16.99.53/24  LAN 192.168.1.1/24
 
-DETACH=2          sysupgrade 已 setsid 脱离
-RESULT_STARTED=2  apply 立即返回
-CURL15=2          API 超时降到 15s
-JS_CATCH=1        JS 有 catch
-OLD_SYNC=0        旧同步写法已不存在
+KEEPD_ddns-go=OK [/etc/ddns-go/]
+KEEPD_smartdns=OK [/etc/smartdns/]
+KEEPD_taskplan=OK [/etc/taskplan/]
+
+ddns-go 造文件后 sysupgrade -l → DDNS_YAML=PRESERVED
+
+kiddin9.conf 存在，feed 行正确
 ```
 
-### 阶段 3 — 升级 + 真实 apply 实测（核心）
+### 阶段 3 — 升级（`R26.10.29` → `R26.10.30`）
 
-升级路径 `R26.05.20` → `R26.10.29` 通过。
-
-随后在 v14 上构造 VERIFIED 作业并**真实调用 apply**：
+升级前在 v14 上种下 ddns-go 配置（188 字节，SHA `70d7e15c...`）：
 
 ```
-APPLY_RC=0
-APPLY_ELAPSED=1s          ← 修复前会阻塞到 20s 触发 XHR 超时
-OUT RESULT=started
-OUT STATE=APPLYING
-
-SYSUPGRADE_RUNNING=yes    ← 返回后 sysupgrade 仍在后台运行
-PS {sysupgrade} /bin/sh /sbin/sysupgrade /overlay/update/firmware.img.gz
-PS {validate_firmwa} /usr/libexec/validate_firmware_image
+旧系统 keep.d/ddns-go: missing（符合预期）
+旧系统 sysupgrade -l:  NOT_PRESERVED
+升级后:                DDNS_CONFIG=GONE   ← 限制所在
+新系统 keep.d 三件套:  全部 OK
 ```
 
-随后设备完成重刷并重启，`TAG=v14-r8202` 仍正确 —— 证明前端 1 秒拿到响应，刷写不受影响。
+随后做同版本重刷（v15 → v15），种下另一份配置（191 字节，SHA `bf60d05e...`）：
+
+```
+sysupgrade -l 收录: /etc/ddns-go/config.yaml
+重刷后:            DDNS_CONFIG=PRESENT
+SHA 一致:          bf60d05ea81ba67406a6b32b4d6ee32706258036e62a26bc204ac5c8bd4205b7
+keep.d 三件套:     ddns-go smartdns taskplan
+```
+
+这一组对照证明：`keep.d` 机制本身有效，局限只在于无法追溯保护安装它的那次升级。
 
 ### 阶段 4 — 恢复出厂
 
 ```
-REVISION=R26.10.29  KERNEL=6.18.58  UPTIME=70s
-DETACH=2  RESULT_STARTED=2  CURL15=2  JS_CATCH=1  OLD_SYNC=0
+REVISION=R26.10.30  KERNEL=6.18.58  TAG=v15-r8202
+KEEPD 三件套全部在位
+DDNS_YAML=PRESERVED（造文件后测试）
+kiddin9.conf 在位
 DNSMASQ/LUCI running  LOG_ERRORS=0
 ```
 
-修复固化在镜像内的 `/usr/sbin/online-update` 与 LuCI JS 中，恢复出厂不会回退。
-
 ### 阶段 5 — 清理
 
-测试机全部 `unregister`，datastore 残留目录已删，临时 HTTP 服务已停。
+测试机全部 `unregister`，datastore 残留已删，临时 HTTP 服务已停。
 
 ---
 
-## 五、验证中的一处发现
+## 四、镜像
 
-测试用的旧快照（`R26.05.20`）**没有安装 `online-update` 包**，因此该快照的在线更新功能本身不可用。原始报错应来自 v7–v10（改名前但含该包的固件），根因完全相同。
+| 文件 | 大小 |
+|---|---|
+| `openwrt-x86-64-generic-squashfs-combined-efi.vmdk` | 185 MB |
+| `openwrt-x86-64-generic-squashfs-combined.vmdk` | 184 MB |
+| `openwrt-x86-64-generic-squashfs-combined-efi.img.gz` | 186 MB |
+| `openwrt-x86-64-generic-squashfs-combined.img.gz` | 186 MB |
+| `openwrt-x86-64-generic-ext4-combined.img.gz` | 234 MB |
+| `openwrt-x86-64-generic-ext4-combined-efi.img.gz` | 234 MB |
+| `openwrt-x86-64-generic.manifest` | 15 KB |
+
+校验：`sha256sum -c RELEASE_SHA256SUMS`
+
+---
+
+## 五、升级
+
+```sh
+# 从 v14 或更早升级前，先备份（见上文「重要限制」）
+sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined.img.gz
+```
+
+或在本版固件内用 `系统 → 在线更新`。
+
+登录：`root` / `password`，**首启后立即 `passwd` 修改**。
 
 ---
 
 ## 六、已知限制
 
-- 测试环境无运营商 IPv6 上游，「拿到前缀 → 外网 IPv6 通」仍无法端到端实测
-- mwan3 默认不管理 IPv6（`wan6 enabled=0`），单线场景走内核正常路由
-- 在线更新仅支持本仓库，不提供任意 URL 源
-- 在线更新的 SHA256 与固件同源，可防传输损坏与单文件替换，防不住整个 Release 被攻陷（未加 GPG 签名）
-- 刷写耗时取决于写入速度，界面在拿到 `RESULT=started` 后即停止等待，实际完成以设备重启为准
+- **v14 及更早版本升级到 v15 仍会丢一次 ddns-go/smartdns/taskplan 配置**，需手动备份恢复；从 v15 起不再需要
+- kiddin9 源未由构建密钥签名，安装需 `--force-signature`
+- 测试环境无运营商 IPv6 上游，IPv6 端到端连通性仍无法实测
+- 在线更新的 SHA256 与固件同源，防不住整个 Release 被攻陷（未加 GPG 签名）
 
 ---
 
-## 七、升级
-
-```sh
-sysupgrade -v /tmp/openwrt-x86-64-generic-squashfs-combined.img.gz
-```
-
-或在本版固件内用 `系统 → 在线更新`（本版起不会再报 XHR 超时）。
-
-登录：`root` / `password`，**首启后立即 `passwd` 修改**。
-
-> 若仍看到超时提示：不要断电，刷写已移交后台，等待设备自动重启即可。日志在 `/overlay/online-update-sysupgrade.log`。
-
----
-
-## 八、许可
+## 七、许可
 
 构建脚本与配置以 MIT 发布。固件内各软件包版权归原作者，LEDE 主源码遵循 GPL-2.0。
