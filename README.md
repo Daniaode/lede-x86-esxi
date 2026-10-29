@@ -5,7 +5,7 @@
 
 基于 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede)，内核 **6.18.55**。
 
-各版本变更见 [Releases](../../releases)。最新为 **v13**：IPv6 修复重构为源码级——`config_generate` 接口派生修复、`odhcpd.defaults` LAN 下发确保、`mwan3` IPv6 接管门控，删除所有运行时兜底脚本；并同步上游（内核 6.18.58）。
+各版本变更见 [Releases](../../releases)。最新为 **v14**：修复在线更新刷写时的 `XHR request timed out` 误报——`cmd_apply` 原来是同步调用 `sysupgrade`（永不返回），导致浏览器 20 秒后超时而刷写其实正在进行；现改为 `setsid` 后台刷写并立即返回 `RESULT=started`。
 
 ---
 
@@ -14,7 +14,7 @@
 | 项目 | 值 |
 |---|---|
 | 版本标识 | `r8199-cbe28467f` |
-| baked tag | `v12-r8200` |
+| baked tag | `v14-r8202` |
 | LEDE 基线 | `24.10.5` |
 | 内核 | `6.18.55` |
 | 目标 | `x86/64` Generic |

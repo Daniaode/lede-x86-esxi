@@ -267,13 +267,22 @@ return view.extend({
 			E('p', { 'class': 'spinning' }, _('Writing the image. The device will reboot; the page will disconnect.'))
 		]);
 
+		/* The helper detaches sysupgrade, so this resolves immediately. A
+		   timeout can still race an unlucky slow reply; it must not surface
+		   as an unhandled rejection error dialog while the flash is actually
+		   running, so treat it as "already started" and keep the modal. */
 		return run('apply').then(function(res) {
 			var out = (res && res.stdout) || '';
 			var err = (res && res.stderr) || '';
+			if (out.indexOf('RESULT=started') !== -1)
+				return;
 			if (out.indexOf('RESULT') === -1 && err) {
 				ui.hideModal();
 				ui.addNotification(null, E('pre', {}, err), 'danger');
 			}
+		}).catch(function() {
+			/* Timeout or dropped connection: the write has been handed off,
+			   so keep the "Installing…" modal and let the reboot finish. */
 		});
 	},
 

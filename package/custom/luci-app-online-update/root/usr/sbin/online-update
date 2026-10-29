@@ -80,7 +80,7 @@ cmd_status() {
 cmd_check() {
 	local json latest cur avail
 
-	json=$(curl -fsSL --max-time 20 \
+	json=$(curl -fsSL --max-time 15 \
 		-H 'Accept: application/vnd.github+json' \
 		-H 'User-Agent: lede-online-update' "$API_URL" 2>/dev/null) || {
 		echo "RESULT=error"; echo "REASON=network"; echo "UPDATE_AVAILABLE=0"; exit 1
@@ -141,7 +141,7 @@ cmd_download() {
 
 	job_state "RUNNING" < /dev/null
 
-	json=$(curl -fsSL --max-time 20 \
+	json=$(curl -fsSL --max-time 15 \
 		-H 'Accept: application/vnd.github+json' \
 		-H 'User-Agent: lede-online-update' "$API_URL" 2>/dev/null) || {
 		printf 'MESSAGE=%s\n' "release API unreachable" | job_state "ERROR"; exit 1
@@ -239,11 +239,22 @@ cmd_apply() {
 	job_state "APPLYING" < /dev/null
 	log "sysupgrade starting (keep_config=$keep)"
 
+	# Detach before flashing. sysupgrade tears the network down and reboots, so
+	# a synchronous call never returns: rpcd reads our stdout until EOF, the
+	# browser's XHR gives up after rpctimeout (20 s) and reports
+	# "XHR request timed out" while the write is actually in progress.
+	# The hash was just re-verified above, so only the slow, network-killing
+	# half is moved to the background.
 	if [ "$keep" = "1" ]; then
-		sysupgrade "$DL_DIR/firmware.img.gz"
+		setsid sh -c "sysupgrade '$DL_DIR/firmware.img.gz' >/overlay/online-update-sysupgrade.log 2>&1" \
+			</dev/null >/dev/null 2>&1 &
 	else
-		sysupgrade -n "$DL_DIR/firmware.img.gz"
+		setsid sh -c "sysupgrade -n '$DL_DIR/firmware.img.gz' >/overlay/online-update-sysupgrade.log 2>&1" \
+			</dev/null >/dev/null 2>&1 &
 	fi
+
+	echo "RESULT=started"
+	echo "STATE=APPLYING"
 }
 
 cmd_cleanup() {
