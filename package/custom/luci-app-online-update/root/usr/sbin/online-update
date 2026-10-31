@@ -9,6 +9,9 @@
 #   - the repository is hardcoded; no URL is ever taken from user input
 #   - only asset names in ASSET_WHITELIST are accepted
 #   - the asset URL must be a github.com release download URL
+#   - an optional download proxy is only ever used as a PREFIX and is itself
+#     validated; the suffix after the prefix must still be a github.com
+#     release URL, so a proxy cannot redirect us to an unrelated host
 #   - SHA256 is verified against RELEASE_SHA256SUMS from the same release
 #   - the hash is re-verified immediately before sysupgrade
 #   - everything goes over HTTPS with curl --fail
@@ -20,6 +23,8 @@ API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 VER_FILE="/etc/online-update-current"
 DL_DIR="/overlay/update"
 JOB="/var/run/online-update-job"
+PROG="/var/run/online-update-job.progress"
+LOCK="/var/run/online-update.lock"
 CFG="online-update"
 MIN_FREE_KB=409600
 ASSET_WHITELIST="openwrt-x86-64-generic-squashfs-combined-efi.img.gz openwrt-x86-64-generic-squashfs-combined.img.gz"
@@ -59,11 +64,239 @@ asset_url() {
 		| grep -F "/$2" | head -n1
 }
 
+# Declared byte size of a named asset, or empty when the API omits it.
+asset_size() {
+	printf '%s' "$1" | jsonfilter -e "@.assets[@.name='$2'].size" 2>/dev/null | head -n1
+}
+
+# ---------------------------------------------------------------------------
+# Job state and progress
+#
+# STATE lives in $JOB and is only ever written whole (.tmp + mv), so a writer
+# never observes a half-updated state machine.
+#
+# Byte progress lives in a SEPARATE file $PROG. The download monitor rewrites
+# it once a second while the main worker keeps switching STATE; sharing one
+# file would make the monitor's mv race the worker's mv and could drop STATE
+# entirely. Separate files remove the race by construction instead of needing
+# a lock.
+
 job_state() {
-	# $1 = STATE value; optional extra "KEY=VALUE" pairs on stdin already written
+	# $1 = STATE value; optional extra "KEY=VALUE" lines already on stdin
 	printf 'STATE=%s\n' "$1" > "$JOB.tmp"
 	cat >> "$JOB.tmp"
 	mv "$JOB.tmp" "$JOB"
+}
+
+prog_write() {
+	# $1 stage, $2 bytes, $3 total, $4 speed B/s, $5 eta seconds
+	local b="${2:-0}" t="${3:-0}" pct=""
+	[ "$t" -gt 0 ] 2>/dev/null && pct=$(( b * 100 / t ))
+	{
+		printf 'STAGE=%s\n' "$1"
+		printf 'BYTES=%s\n' "$b"
+		printf 'TOTAL=%s\n' "$t"
+		printf 'SPEED=%s\n' "${4:-0}"
+		printf 'PERCENT=%s\n' "${pct:-}"
+		printf 'ETA=%s\n' "${5:-}"
+	} > "$PROG.tmp" 2>/dev/null && mv "$PROG.tmp" "$PROG" 2>/dev/null
+}
+
+prog_clear() { rm -f "$PROG" "$PROG.tmp" 2>/dev/null; }
+
+# Single-writer lock. Two workers sharing one output filename is not a
+# theoretical hazard: a stale worker that fails used to `rm -f` the same path
+# a fresh worker was streaming into, so the live download vanished from the
+# filesystem while its curl kept writing to an unlinked inode. The UI showed
+# 0 bytes forever. mkdir is atomic and needs no flock on BusyBox.
+lock_acquire() {
+	if mkdir "$LOCK" 2>/dev/null; then
+		echo $$ > "$LOCK/pid"
+		return 0
+	fi
+	local other
+	other=$(cat "$LOCK/pid" 2>/dev/null)
+	if [ -n "$other" ] && [ -d "/proc/$other" ]; then
+		return 1
+	fi
+	# Holder is gone (reboot, kill -9): reclaim.
+	rm -rf "$LOCK" 2>/dev/null
+	mkdir "$LOCK" 2>/dev/null || return 1
+	echo $$ > "$LOCK/pid"
+	return 0
+}
+
+lock_release() {
+	[ "$(cat "$LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK" 2>/dev/null
+	return 0
+}
+
+# File size in bytes. BusyBox on this image ships no `stat`, so `stat -c %s`
+# silently yields an empty string and every progress figure would read 0.
+# `wc -c <` is present everywhere and prints nothing for a missing file, hence
+# the numeric default.
+fsize() {
+	local n
+	n=$(wc -c < "$1" 2>/dev/null)
+	case "$n" in ''|*[!0-9]*) echo 0 ;; *) echo "$n" ;; esac
+}
+
+fail() {
+	# $1 human readable message, $2 stable reason code
+	{
+		printf 'MESSAGE=%s\n' "$1"
+		printf 'REASON=%s\n' "$2"
+	} | job_state "ERROR"
+	prog_clear
+	log "job failed: $1 ($2)"
+	exit 1
+}
+
+# Map a curl exit code to a message + reason code that mean something to a
+# person, instead of surfacing the raw number.
+curl_reason() {
+	case "$1" in
+	6)  echo "DNS lookup of the download host failed|network" ;;
+	7)  echo "cannot connect to the download host (network unreachable or blocked)|network" ;;
+	22) echo "the server returned an error (file missing, or the proxy refused it)|http" ;;
+	23) echo "write failed while saving the image: out of disk space|disk" ;;
+	28) echo "the download stalled or timed out (the proxy may be too slow)|timeout" ;;
+	35) echo "TLS handshake failed (the proxy may be intercepting the connection)|tls" ;;
+	60) echo "TLS certificate validation failed (the proxy may be intercepting the connection)|tls" ;;
+	18) echo "transfer ended early, the file is incomplete|truncated" ;;
+	*)  echo "download failed (curl exit code $1)|curl" ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# Download proxy
+#
+# A proxy is only ever prepended to an already-validated github.com URL. Both
+# the host part and the reserved characters are constrained so a user-supplied
+# value cannot smuggle in a query, fragment, credentials or a second scheme.
+
+proxy_prefix() {
+	local preset p
+	preset=$(uci_get proxy_preset)
+	[ -z "$preset" ] && preset=direct
+
+	case "$preset" in
+		direct)      p="" ;;
+		gh-proxy)    p="https://gh-proxy.com/" ;;
+		ghfast)      p="https://ghfast.top/" ;;
+		hk-gh-proxy) p="https://hk.gh-proxy.com/" ;;
+		custom)      p=$(uci_get github_proxy) ;;
+		*)           p="" ;;
+	esac
+
+	[ -z "$p" ] && { echo ""; return 0; }
+
+	# A pasted FULL url (https://proxy/https://github.com/...) is accepted by
+	# keeping only the part before the github host. That is the form people
+	# copy from proxy sites, and rejecting it would look like the feature is
+	# broken. Everything before the github host is the prefix.
+	case "$p" in
+		*https://github.com/*) p="${p%%https://github.com/*}" ;;
+	esac
+
+	# Normalise: exactly one https://, a plain host[:port], a plain path,
+	# one trailing slash, and nothing that could change the request target.
+	case "$p" in
+		https://*) ;;
+		*) log "proxy rejected (not https): $p"; echo ""; return 0 ;;
+	esac
+	case "$p" in
+		*'?'*|*'#'*|*'@'*|*' '*) log "proxy rejected (reserved char): $p"; echo ""; return 0 ;;
+	esac
+	p=$(echo "$p" | sed 's#/*$##')
+	[ -n "$p" ] || { echo ""; return 0; }
+	case "$p" in
+		https://?*) ;;
+		*) echo ""; return 0 ;;
+	esac
+	case "$p" in
+		*://*://*|*://*/*://*) log "proxy rejected (nested scheme): $p"; echo ""; return 0 ;;
+	esac
+
+	echo "$p/"
+}
+
+# Build the URL actually handed to curl, and prove the result still points at
+# a github.com release asset once the prefix is removed.
+proxied_url() {
+	local url="$1" prefix full rest
+	prefix=$(proxy_prefix)
+
+	case "$url" in
+		https://github.com/*/releases/download/*) ;;
+		*) echo "asset URL rejected" >&2; return 1 ;;
+	esac
+
+	[ -z "$prefix" ] && { echo "$url"; return 0; }
+
+	full="${prefix}${url}"
+	rest="${full#"$prefix"}"
+	case "$rest" in
+		https://github.com/*/releases/download/*) ;;
+		*) echo "proxy would redirect away from github.com" >&2; return 1 ;;
+	esac
+	echo "$full"
+}
+
+# ---------------------------------------------------------------------------
+# Download with live progress
+#
+# Total size comes from the release API, so the monitor only has to stat the
+# growing file. A background sample of file size once a second is immune to
+# curl's output buffering and needs no --write-out juggling.
+
+fetch_asset() {
+	# $1 url, $2 output path, $3 known total bytes (0 = unknown)
+	local url="$1" out="$2" total="${3:-0}"
+	local done_mark="$DL_DIR/.download-finished.$$"
+
+	rm -f "$done_mark"
+	prog_write "DOWNLOADING" 0 "$total" 0 ""
+
+	(
+		prev=0; prev_t=$(date +%s)
+		while [ ! -f "$done_mark" ]; do
+			cur=$(fsize "$out")
+			now=$(date +%s)
+			dt=$((now - prev_t)); [ "$dt" -lt 1 ] && dt=1
+			spd=$(( (cur - prev) / dt )); [ "$spd" -lt 0 ] && spd=0
+			eta=""
+			if [ "$total" -gt 0 ] 2>/dev/null && [ "$spd" -gt 0 ]; then
+				eta=$(( (total - cur) / spd )); [ "$eta" -lt 0 ] && eta=0
+			fi
+			prog_write "DOWNLOADING" "$cur" "$total" "$spd" "$eta"
+			prev=$cur; prev_t=$now
+			sleep 1
+		done
+	) &
+	local mon=$!
+
+	# --connect-timeout bounds a hanging proxy: without it curl waits two
+	# minutes on a stalled handshake while the UI sits at 0% with no error.
+	# --speed-limit/--speed-time abandon a transfer that has effectively
+	# stalled, instead of holding the lock for the full --max-time.
+	curl -fsS -L \
+		--connect-timeout 20 \
+		--speed-limit 1024 --speed-time 120 \
+		--max-time 1800 \
+		-o "$out" "$url"
+	local rc=$?
+
+	touch "$done_mark"
+	wait "$mon" 2>/dev/null
+	rm -f "$done_mark"
+
+	# Settle the final figure at the true byte count.
+	if [ "$rc" -eq 0 ]; then
+		final=$(fsize "$out")
+		prog_write "DOWNLOADING" "$final" "${total:-$final}" 0 0
+	fi
+	return $rc
 }
 
 # ---------------------------------------------------------------------------
@@ -73,6 +306,9 @@ cmd_status() {
 	echo "CHECK_ENABLED=$(uci_get check_enabled)"
 	echo "AUTO_HOURS=$(uci_get auto_check_hours)"
 	echo "KEEP_CONFIG=$(uci_get keep_config)"
+	echo "PROXY_PRESET=$(uci_get proxy_preset)"
+	echo "GITHUB_PROXY=$(uci_get github_proxy)"
+	echo "PROXY_EFFECTIVE=$(proxy_prefix)"
 	echo "IGNORED=$(uci -q get "${CFG}.main.ignored_versions" 2>/dev/null | tr '\n' ' ')"
 	echo "REPO=$REPO"
 }
@@ -135,23 +371,33 @@ cmd_unignore() {
 	echo "RESULT=ok"
 }
 
-# Long-running; runs detached. Progress lands in $JOB.
+# Long-running; runs detached. Progress lands in $JOB and $PROG.
 cmd_download() {
-	local json tag url img sums_url avail want got
+	local json tag url img sums_url avail want got total
 
-	job_state "RUNNING" < /dev/null
+	# One worker at a time. See lock_acquire for why this is not optional.
+	if ! lock_acquire; then
+		# Exit WITHOUT touching $JOB/$PROG: the process holding the lock owns
+		# them, and writing here would overwrite a live download's state with
+		# a spurious error (and delete the progress file it is updating).
+		log "another download is already running; exiting without touching state"
+		exit 0
+	fi
+	trap 'lock_release' EXIT INT TERM
+
+	job_state "CHECKING" < /dev/null
+	prog_clear
 
 	json=$(curl -fsSL --max-time 15 \
 		-H 'Accept: application/vnd.github+json' \
-		-H 'User-Agent: lede-online-update' "$API_URL" 2>/dev/null) || {
-		printf 'MESSAGE=%s\n' "release API unreachable" | job_state "ERROR"; exit 1
-	}
+		-H 'User-Agent: lede-online-update' "$API_URL" 2>/dev/null) || \
+		fail "the release API is unreachable" "network"
 
 	tag=$(jfield "$json" '@.tag_name')
-	[ -n "$tag" ] || { printf 'MESSAGE=%s\n' "cannot parse tag" | job_state "ERROR"; exit 1; }
+	[ -n "$tag" ] || fail "cannot parse the release tag" "parse"
 
 	if ! remote_is_newer "$(local_version)" "$tag"; then
-		printf 'MESSAGE=%s\n' "no newer release" | job_state "ERROR"; exit 1
+		fail "there is no newer release than $(local_version)" "uptodate"
 	fi
 
 	url=""; img=""
@@ -159,45 +405,75 @@ cmd_download() {
 		url=$(asset_url "$json" "$n")
 		[ -n "$url" ] && { img="$n"; break; }
 	done
-	[ -n "$url" ] || { printf 'MESSAGE=%s\n' "no whitelisted asset" | job_state "ERROR"; exit 1; }
+	[ -n "$url" ] || fail "the release has no whitelisted firmware asset" "parse"
 
-	case "$url" in
-		https://github.com/*/releases/download/*) ;;
-		*) printf 'MESSAGE=%s\n' "asset URL rejected" | job_state "ERROR"; exit 1 ;;
-	esac
+	total=$(asset_size "$json" "$img")
+	case "$total" in ''|*[!0-9]*) total=0 ;; esac
 
 	sums_url="${url%/*}/RELEASE_SHA256SUMS"
 
-	mkdir -p "$DL_DIR" || { printf 'MESSAGE=%s\n' "cannot create $DL_DIR" | job_state "ERROR"; exit 1; }
+	mkdir -p "$DL_DIR" || fail "cannot create $DL_DIR" "disk"
 
 	avail=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')
-	[ "${avail:-0}" -ge "$MIN_FREE_KB" ] || {
-		printf 'MESSAGE=%s\n' "insufficient space (${avail:-0} KB)" | job_state "ERROR"; exit 1
+	[ "${avail:-0}" -ge "$MIN_FREE_KB" ] || \
+		fail "not enough space on /overlay (${avail:-0} KB free, need ${MIN_FREE_KB})" "space"
+
+	# Download into a private path and only rename on success. A shared
+	# output name would let a dying worker's cleanup unlink the file a live
+	# worker is streaming into.
+	local part="$DL_DIR/.firmware.$$.part"
+	rm -f "$part"
+
+	# The proxy only ever wraps the download URLs; the API call above is
+	# always direct so a broken proxy cannot hide a genuine release.
+	url=$(proxied_url "$url") || fail "the configured proxy was rejected" "proxy"
+	sums_url=$(proxied_url "$sums_url") || fail "the configured proxy was rejected" "proxy"
+
+	log "downloading $tag/$img (proxy=$(proxy_prefix))"
+
+	{
+		printf 'TAG=%s\n' "$tag"
+		printf 'ASSET=%s\n' "$img"
+	} | job_state "DOWNLOADING"
+
+	fetch_asset "$url" "$part" "$total"
+	rc=$?
+	[ "$rc" -eq 0 ] || {
+		msg=$(curl_reason "$rc"); r=${msg#*|}; m=${msg%|*}
+		rm -f "$part"
+		fail "$m" "$r"
 	}
 
-	rm -f "$DL_DIR/firmware.img.gz" "$DL_DIR/SHA256SUMS"
-	log "downloading $tag/$img"
+	if ! err=$(mv "$part" "$DL_DIR/firmware.img.gz" 2>&1); then
+		# Report what actually happened. Labelling every rename failure "disk"
+		# hid the real cause on a filesystem that had 1.7 GB free.
+		[ -f "$part" ] || err="${err:-the temporary file vanished before it could be moved}"
+		rm -f "$part"
+		fail "cannot store the downloaded image: ${err:-unknown error}" "store"
+	fi
 
-	curl -fsS -L --max-time 1800 -o "$DL_DIR/firmware.img.gz" "$url" || {
-		printf 'MESSAGE=%s\n' "firmware download failed" | job_state "ERROR"; exit 1
-	}
-	curl -fsS -L --max-time 60 -o "$DL_DIR/SHA256SUMS" "$sums_url" || {
-		printf 'MESSAGE=%s\n' "checksum download failed" | job_state "ERROR"; exit 1
-	}
+	prog_write "VERIFYING" "$(fsize "$DL_DIR/firmware.img.gz")" "$total" 0 ""
+	{
+		printf 'TAG=%s\n' "$tag"
+		printf 'ASSET=%s\n' "$img"
+	} | job_state "VERIFYING"
+
+	curl -fsS -L --max-time 60 -o "$DL_DIR/SHA256SUMS" "$sums_url" 2>/dev/null || \
+		fail "the checksum manifest could not be downloaded" "network"
 
 	want=$(grep -F " $img" "$DL_DIR/SHA256SUMS" 2>/dev/null | awk '{print $1}' | head -n1)
-	[ -n "$want" ] || { printf 'MESSAGE=%s\n' "no checksum entry for $img" | job_state "ERROR"; exit 1; }
+	[ -n "$want" ] || fail "the manifest has no entry for $img" "parse"
 
 	got=$(sha256sum "$DL_DIR/firmware.img.gz" 2>/dev/null | awk '{print $1}')
 	if [ "$want" != "$got" ]; then
 		rm -f "$DL_DIR/firmware.img.gz" "$DL_DIR/SHA256SUMS"
-		printf 'MESSAGE=%s\n' "SHA256 mismatch, file discarded" | job_state "ERROR"
 		log "SHA256 mismatch want=$want got=$got"
-		exit 1
+		fail "SHA256 does not match the release manifest; the file was discarded" "hash"
 	fi
 
 	log "verified $tag/$img"
 
+	prog_write "VERIFIED" "$(fsize "$DL_DIR/firmware.img.gz")" "$total" 0 0
 	{
 		printf 'TAG=%s\n' "$tag"
 		printf 'ASSET=%s\n' "$img"
@@ -208,17 +484,31 @@ cmd_download() {
 # Spawns the download worker detached so the rpcd call returns immediately.
 # Progress is polled through `jobstatus`.
 cmd_start() {
-	rm -f "$JOB"
-	job_state "RUNNING" < /dev/null
+	# Never clear $JOB/$PROG here. A download may already be in flight and the
+	# UI polls those files, so wiping them made a second click erase a running
+	# job's state and progress. Clearing is the worker's business, once it
+	# actually holds the lock.
+	local other
+	other=$(cat "$LOCK/pid" 2>/dev/null)
+	if [ -n "$other" ] && [ -d "/proc/$other" ]; then
+		echo "RESULT=busy"
+		echo "STATE=DOWNLOADING"
+		return 0
+	fi
+
 	# setsid detaches into its own session: the worker must survive this
 	# rpcd call returning, otherwise the download is killed mid-flight.
 	setsid /usr/sbin/online-update download >/dev/null 2>&1 < /dev/null &
 	echo "RESULT=started"
-	echo "STATE=RUNNING"
+	echo "STATE=CHECKING"
 }
 
+# STATE is authoritative; STAGE/BYTES/TOTAL/PERCENT/SPEED/ETA are merged in
+# from the progress file when a download is in flight.
 cmd_jobstatus() {
 	if [ -f "$JOB" ]; then cat "$JOB"; else echo "STATE=IDLE"; fi
+	[ -f "$PROG" ] && cat "$PROG"
+	return 0
 }
 
 # Only runs on a VERIFIED job, and re-checks the hash right before flashing.
@@ -236,7 +526,11 @@ cmd_apply() {
 	keep=$(uci_get keep_config)
 	[ -z "$keep" ] && keep=1
 
-	job_state "APPLYING" < /dev/null
+	{
+		printf 'TAG=%s\n' "$(sed -n 's/^TAG=//p' "$JOB" 2>/dev/null | head -n1)"
+		printf 'SHA256=%s\n' "$got"
+	} | job_state "APPLYING"
+	prog_write "APPLYING" 0 0 0 ""
 	log "sysupgrade starting (keep_config=$keep)"
 
 	# Detach before flashing. sysupgrade tears the network down and reboots, so
@@ -258,10 +552,27 @@ cmd_apply() {
 }
 
 cmd_cleanup() {
-	rm -f "$DL_DIR/firmware.img.gz" "$DL_DIR/SHA256SUMS" "$JOB" 2>/dev/null
+	# Do not touch the lock or any in-flight .part file while a worker holds
+	# the lock: deleting them under a live download destroyed the file it was
+	# streaming into and made the next run fail to move its result into place.
+	local other
+	other=$(cat "$LOCK/pid" 2>/dev/null)
+	if [ -n "$other" ] && [ -d "/proc/$other" ]; then
+		echo "RESULT=busy"
+		echo "NOTE=a download is running"
+		return 0
+	fi
+
+	rm -f "$DL_DIR/firmware.img.gz" "$DL_DIR/SHA256SUMS" "$JOB" "$PROG" 2>/dev/null
+	rm -f "$DL_DIR"/.firmware.*.part "$DL_DIR"/.download-finished.* 2>/dev/null
+	rm -rf "$LOCK" 2>/dev/null
 	echo "RESULT=ok"
 }
 
+# Test seam: with ONLINE_UPDATE_NO_MAIN set the file only defines functions, so
+# a test can `. ./online-update` and exercise the real fsize/prog_write/
+# fetch_asset/proxied_url instead of a reimplementation that could drift.
+if [ -z "${ONLINE_UPDATE_NO_MAIN:-}" ]; then
 case "$1" in
 	status)    cmd_status ;;
 	check)     cmd_check ;;
@@ -274,3 +585,4 @@ case "$1" in
 	cleanup)   cmd_cleanup ;;
 	*) echo "Usage: $0 {status|check|ignore <tag>|unignore <tag>|start|download|jobstatus|apply|cleanup}" >&2; exit 2 ;;
 esac
+fi

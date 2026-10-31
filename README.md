@@ -5,7 +5,7 @@
 
 基于 [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede)，内核 **6.18.55**。
 
-各版本变更见 [Releases](../../releases)。最新为 **v15**：为 `ddns-go`/`smartdns`/`taskplan` 补上 `keep.d` 持久化声明（它们的真实配置不在 `/etc/config/` 里，升级会丢），并加入 kiddin9 社区源。**注意**：从 v14 及更早升级到 v15 仍会丢一次这些配置，需先手动备份。
+各版本变更见 [Releases](../../releases)。最新为 **v16**：修复在线升级点「开始下载」毫无反应（rpcd 白名单漏了 `start` 动词），新增下载进度/速度/剩余时间显示，加入 GitHub 下载代理通道，并修正镜像自报版本（baked tag）。**注意**：升级到 v16 后 `check` 显示「已是最新」属正确行为——镜像自称 v16，线上最新仍为 v15。
 
 ---
 
@@ -14,7 +14,7 @@
 | 项目 | 值 |
 |---|---|
 | 版本标识 | `r8199-cbe28467f` |
-| baked tag | `v15-r8202` |
+| baked tag | `v16-20261031` |
 | LEDE 基线 | `24.10.5` |
 | 内核 | `6.18.55` |
 | 目标 | `x86/64` Generic |

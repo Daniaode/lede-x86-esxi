@@ -6,11 +6,22 @@ import { popen, access } from 'fs';
 
 const HELPER = '/usr/sbin/online-update';
 
-/* Only these verbs may be invoked from LuCI. Anything else is refused. */
+/* Only these verbs may be invoked from LuCI. Anything else is refused.
+ *
+ * This table must stay in sync with the verbs the frontend actually calls:
+ *   status check jobstatus start apply cleanup ignore unignore
+ * `download` is deliberately listed too, even though only the detached
+ * worker calls it, so a future frontend change does not have to touch this
+ * file. tests/check-verbs.sh enforces the sync at build time.
+ *
+ * `start` was missing until v16, which made "Start download" fail with
+ * "command not allowed"; the frontend swallowed that error, reloaded, and
+ * the job never left IDLE. */
 const ALLOWED = {
 	status:    { args: 0 },
 	check:     { args: 0 },
 	jobstatus: { args: 0 },
+	start:     { args: 0 },
 	apply:     { args: 0 },
 	cleanup:   { args: 0 },
 	download:  { args: 0 },

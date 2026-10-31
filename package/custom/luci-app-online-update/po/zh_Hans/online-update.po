@@ -135,3 +135,69 @@ msgstr "在线更新"
 
 msgid "Firmware update"
 msgstr "固件更新"
+
+msgid "Checking the release repository…"
+msgstr "正在检查发布仓库…"
+
+msgid "Downloading firmware…"
+msgstr "正在下载固件…"
+
+msgid "Verifying SHA256…"
+msgstr "正在校验 SHA256…"
+
+msgid "Verified, ready to install"
+msgstr "校验通过，可以安装"
+
+msgid "Writing the image, the device will reboot…"
+msgstr "正在写入镜像，设备将重启…"
+
+msgid "Size: %s"
+msgstr "大小：%s"
+
+msgid "%s left"
+msgstr "剩余 %s"
+
+msgid "Reason: %s"
+msgstr "原因：%s"
+
+msgid "Reading %s back and comparing against the release manifest."
+msgstr "正在回读 %s 并与发布清单比对。"
+
+msgid "Download proxy"
+msgstr "下载代理"
+
+msgid "A proxy only changes where the file is fetched from. The SHA256 check is always performed against the release manifest, so a proxy that alters the file will be detected and the download discarded."
+msgstr "代理只改变文件的来源地址。SHA256 始终以发布清单为准校验，因此代理篡改过的文件会被发现并丢弃。"
+
+msgid "Channel"
+msgstr "通道"
+
+msgid "Custom prefix"
+msgstr "自定义前缀"
+
+msgid "Used only when the channel is \"Custom\". Leave empty for a direct connection. Must start with https:// and end with a slash."
+msgstr "仅在通道为「自定义」时使用。留空则直连。必须以 https:// 开头、以斜杠结尾。"
+
+msgid "Effective prefix"
+msgstr "当前生效前缀"
+
+msgid "none (direct)"
+msgstr "无（直连）"
+
+msgid "Direct (no proxy)"
+msgstr "直连（不使用代理）"
+
+msgid "Custom"
+msgstr "自定义"
+
+msgid "Save proxy"
+msgstr "保存代理"
+
+msgid "Proxy saved. It applies to the next download only; verification still uses the release manifest."
+msgstr "代理已保存。仅对下一次下载生效；校验仍以发布清单为准。"
+
+msgid "The download could not be started: %s"
+msgstr "无法开始下载：%s"
+
+msgid "unknown error"
+msgstr "未知错误"

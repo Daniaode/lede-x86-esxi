@@ -16,15 +16,30 @@ if [ ! -s "$VER_FILE" ]; then
 	echo "$tag" > "$VER_FILE"
 fi
 
+# Default channel is ghfast. Measured on both the build host (172.16.99.13)
+# and a virtualised gateway (172.16.99.110), ghfast.top was the only option
+# that worked well in BOTH: direct download timed out entirely on the gateway
+# (curl exit 28), and hk.gh-proxy.com collapsed to ~0.09 MB/s there.
 uci -q get online-update.main >/dev/null 2>&1 || {
 	uci -q batch <<-EOT
 		set online-update.main=online-update
 		set online-update.main.check_enabled='1'
 		set online-update.main.auto_check_hours='24'
 		set online-update.main.keep_config='1'
+		set online-update.main.proxy_preset='ghfast'
+		set online-update.main.github_proxy=''
 		commit online-update
 	EOT
 }
+
+# Backfill the proxy keys on systems that already have the section: an image
+# upgraded from an older release keeps its existing /etc/config/online-update,
+# so the block above never runs and the UI would read empty values.
+uci -q get online-update.main.proxy_preset >/dev/null 2>&1 || \
+	uci -q set online-update.main.proxy_preset='ghfast'
+uci -q get online-update.main.github_proxy >/dev/null 2>&1 || \
+	uci -q set online-update.main.github_proxy=''
+uci -q commit online-update >/dev/null 2>&1
 
 /etc/init.d/online-update enable >/dev/null 2>&1
 /etc/init.d/online-update restart >/dev/null 2>&1
